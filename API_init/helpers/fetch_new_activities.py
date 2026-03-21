@@ -93,21 +93,27 @@ def fetch_new_activities(
     # Small overlap buffer to avoid missing edge cases (timezone / identical timestamps)
     after_dt = after_dt - timedelta(minutes=2)
 
-    after_ts = int(after_dt.timestamp())
+    print(f"Fetching activities from {after_dt}")
 
-    new_summaries = list(client.get_activities(after=after_ts))
+    new_summaries = list(client.get_activities(after=after_dt))
+
+    print(f"Found {len(new_summaries)} activities")
 
     n_details_added = 0
     n_streams_added = 0
 
-    for idx, summary in enumerate(new_summaries, start=1):
+    for idx, summary in enumerate(new_summaries, start=0):
         # optional type filter
-        if runs_only and str(summary.type) != "Run":
+        if runs_only and str(summary.type) != "root=\'Run\'":
+            print(f"here (not run) {summary.type}")
             continue
 
         activity_id = int(summary.id)
 
+        print(f"Activity ID: {activity_id}")
+
         if activity_id not in detailed_ids:
+            print("here (not in detailed_ids)")
             try:
                 full = client.get_activity(activity_id)
                 detailed.append(full.model_dump())
