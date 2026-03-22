@@ -1,0 +1,16 @@
+# Secrets
+.streamlit/secrets.toml
+
+# Strava data cache
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# OS
+.DS_Store
