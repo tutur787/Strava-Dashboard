@@ -16,7 +16,7 @@ import streamlit as st
 # Config
 # -----------------------------
 st.set_page_config(
-    page_title="Runly",
+    page_title="Allure",
     page_icon="🏃",
     layout="wide",
 )
