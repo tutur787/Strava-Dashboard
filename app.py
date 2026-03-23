@@ -412,15 +412,45 @@ def acwr_band(acwr: float) -> Tuple[str, str]:
     return ("Very high", "🔴")
 
 
-def _format_min_per_km(x: float) -> str:
-    if x is None or (isinstance(x, float) and np.isnan(x)):
+KM_TO_MILES = 0.621371
+
+
+def _format_pace(min_per_km: float, use_miles: bool = False) -> str:
+    """Format pace as M:SS/km or M:SS/mi."""
+    if min_per_km is None or (isinstance(min_per_km, float) and np.isnan(min_per_km)):
         return "—"
-    m = int(x)
-    s = int(round((x - m) * 60))
+    val = min_per_km / KM_TO_MILES if use_miles else min_per_km
+    m = int(val)
+    s = int(round((val - m) * 60))
     if s == 60:
-        m += 1
-        s = 0
-    return f"{m}:{s:02d}/km"
+        m += 1; s = 0
+    unit = "mi" if use_miles else "km"
+    return f"{m}:{s:02d}/{unit}"
+
+
+def _format_min_per_km(x: float, use_miles: bool = False) -> str:
+    """Legacy alias kept for compatibility."""
+    return _format_pace(x, use_miles)
+
+
+def _dist_fmt(km: float, use_miles: bool = False, decimals: int = 1) -> str:
+    """Format distance with unit label."""
+    if use_miles:
+        return f"{km * KM_TO_MILES:.{decimals}f} mi"
+    return f"{km:.{decimals}f} km"
+
+
+def _d_unit(use_miles: bool = False) -> str:
+    return "mi" if use_miles else "km"
+
+
+def _p_unit(use_miles: bool = False) -> str:
+    return "min/mi" if use_miles else "min/km"
+
+
+def _to_display_dist(km: float, use_miles: bool = False) -> float:
+    """Convert km value to display units (km or mi)."""
+    return km * KM_TO_MILES if use_miles else km
 
 
 # -----------------------------
@@ -893,7 +923,7 @@ def compute_consistency(activities: pd.DataFrame) -> dict:
 # -----------------------------
 # Training calendar heatmap
 # -----------------------------
-def build_calendar_heatmap(activities: pd.DataFrame, n_weeks: int = 53) -> go.Figure:
+def build_calendar_heatmap(activities: pd.DataFrame, n_weeks: int = 53, use_miles: bool = False) -> go.Figure:
     acts = activities.copy()
     acts["date"] = acts["start_dt_local"].dt.normalize()
 
@@ -923,7 +953,8 @@ def build_calendar_heatmap(activities: pd.DataFrame, n_weeks: int = 53) -> go.Fi
         d_str = r["date"].strftime("%a %b %-d, %Y")
         if r["distance_km"] > 0:
             tag = f" · {r['run_type']}" if has_type and r["run_type"] != "rest" else ""
-            return f"{d_str}<br>{r['distance_km']:.1f} km · {int(r['n_runs'])} run{'s' if r['n_runs'] != 1 else ''}{tag}"
+            dist_str = _dist_fmt(r["distance_km"], use_miles)
+            return f"{d_str}<br>{dist_str} · {int(r['n_runs'])} run{'s' if r['n_runs'] != 1 else ''}{tag}"
         return f"{d_str}<br>Rest"
 
     cal["hover"] = cal.apply(_hover, axis=1)
@@ -1127,16 +1158,34 @@ def get_valid_token(client_id, client_secret) -> Optional[str]:
     return tokens["access_token"]
 
 
+def _strava_get(url: str, access_token: str, params: dict = None, max_retries: int = 4) -> requests.Response:
+    """GET with exponential back-off on 429 (rate limit) and transient 5xx errors."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    for attempt in range(max_retries):
+        resp = requests.get(url, headers=headers, params=params or {}, timeout=30)
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
+            wait = min(wait, 60)
+            time.sleep(wait)
+            continue
+        if resp.status_code >= 500 and attempt < max_retries - 1:
+            time.sleep(2 ** attempt)
+            continue
+        return resp
+    return resp  # return last response even if still failing
+
+
 def fetch_all_activities_api(access_token: str) -> list:
-    """Fetch all activities from Strava API (paginated)."""
+    """Fetch all activities from Strava API (paginated, rate-limit safe)."""
     all_acts = []
     page = 1
     while True:
-        resp = requests.get(
-            f"{STRAVA_API_BASE}/athlete/activities",
-            headers={"Authorization": f"Bearer {access_token}"},
+        resp = _strava_get(
+            f"{STRAVA_API_BASE}/athlete/activities", access_token,
             params={"per_page": 200, "page": page},
         )
+        if resp.status_code != 200:
+            break
         batch = resp.json()
         if not isinstance(batch, list) or len(batch) == 0:
             break
@@ -1148,10 +1197,9 @@ def fetch_all_activities_api(access_token: str) -> list:
 
 
 def fetch_activity_streams_api(activity_id: int, access_token: str) -> dict:
-    """Fetch streams for a single activity."""
-    resp = requests.get(
-        f"{STRAVA_API_BASE}/activities/{activity_id}/streams",
-        headers={"Authorization": f"Bearer {access_token}"},
+    """Fetch streams for a single activity (rate-limit safe)."""
+    resp = _strava_get(
+        f"{STRAVA_API_BASE}/activities/{activity_id}/streams", access_token,
         params={"keys": "time,heartrate,velocity_smooth,cadence,altitude,latlng", "key_by_type": "true"},
     )
     return resp.json() if resp.status_code == 200 else {}
@@ -1192,7 +1240,8 @@ def save_strava_disk_cache(activities_raw: list, streams_dict: Dict) -> None:
 
 # ── Supabase helpers ──────────────────────────────────────────────────
 # Run in Supabase SQL editor:
-# CREATE TABLE athletes (athlete_id BIGINT PRIMARY KEY, display_name TEXT, refresh_token TEXT, fetched_at TIMESTAMPTZ DEFAULT NOW());
+# CREATE TABLE athletes (athlete_id BIGINT PRIMARY KEY, display_name TEXT, refresh_token TEXT, fetched_at TIMESTAMPTZ DEFAULT NOW(), preferences JSONB DEFAULT '{}');
+# If you already created the table: ALTER TABLE athletes ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}';
 # CREATE TABLE activities (athlete_id BIGINT, activity_id BIGINT, data JSONB, PRIMARY KEY (athlete_id, activity_id));
 # CREATE TABLE streams (athlete_id BIGINT, activity_id BIGINT, data JSONB, PRIMARY KEY (athlete_id, activity_id));
 # CREATE INDEX idx_activities_athlete ON activities(athlete_id);
@@ -1258,6 +1307,28 @@ def sb_load_activities(athlete_id: int) -> Optional[list]:
         resp = _get_supabase().table("activities").select("data").eq("athlete_id", athlete_id).execute()
         if resp.data:
             return [row["data"] for row in resp.data]
+    except Exception:
+        pass
+    return None
+
+
+def sb_save_preferences(athlete_id: int, prefs: dict) -> Optional[str]:
+    """Save sidebar preferences to athletes table. Returns error string or None."""
+    try:
+        _get_supabase().table("athletes").update({"preferences": prefs}).eq("athlete_id", athlete_id).execute()
+        return None
+    except Exception as e:
+        return str(e)
+
+
+def sb_load_preferences(athlete_id: int) -> Optional[dict]:
+    """Load saved sidebar preferences. Returns dict or None."""
+    try:
+        resp = (_get_supabase().table("athletes")
+                .select("preferences").eq("athlete_id", athlete_id)
+                .maybe_single().execute())
+        if resp.data and resp.data.get("preferences"):
+            return resp.data["preferences"]
     except Exception:
         pass
     return None
@@ -1453,6 +1524,11 @@ if "code" in _qp and _OAUTH_ENABLED and "strava_tokens" not in st.session_state:
                 st.session_state["strava_athlete_name"] = (
                     f"{_ath.get('firstname', '')} {_ath.get('lastname', '')}".strip()
                 )
+                # Pre-load saved preferences so sidebar uses them immediately
+                if _SUPABASE_ENABLED and "_prefs" not in st.session_state:
+                    _prefs_now = sb_load_preferences(int(_ath_id))
+                    if _prefs_now:
+                        st.session_state["_prefs"] = _prefs_now
             st.query_params.clear()
             st.rerun()
         else:
@@ -1475,15 +1551,20 @@ if _OAUTH_ENABLED and "strava_tokens" not in st.session_state and _COOKIES_ENABL
         if "access_token" in _new_tokens:
             st.session_state["strava_tokens"] = _new_tokens
             st.session_state["strava_athlete_id"] = int(_cookie_athlete_id)
-            # Rotate refresh token in cookie
-            if _cookies is not None:
-                _cookies.set("strava_refresh_token", _new_tokens["refresh_token"],
-                             secure=True, same_site="Lax")
-            # Update in Supabase too
+            # Fetch athlete name + preferences from Supabase
             if _SUPABASE_ENABLED:
                 _ath_row = sb_load_athlete(int(_cookie_athlete_id))
-                _ath_name = _ath_row.get("display_name", "") if _ath_row else ""
-                sb_save_athlete(int(_cookie_athlete_id), _ath_name, _new_tokens["refresh_token"])
+                if _ath_row:
+                    st.session_state["strava_athlete_name"] = _ath_row.get("display_name", "")
+                    if _ath_row.get("preferences") and "_prefs" not in st.session_state:
+                        st.session_state["_prefs"] = _ath_row["preferences"]
+                    # Rotate refresh token in Supabase
+                    sb_save_athlete(int(_cookie_athlete_id), _ath_row.get("display_name", ""),
+                                    _new_tokens["refresh_token"])
+            # Rotate refresh token in cookie (no Secure flag — works on HTTP + HTTPS)
+            if _cookies is not None:
+                _cookies.set("strava_refresh_token", _new_tokens["refresh_token"])
+                _cookies.set("strava_athlete_id", str(_cookie_athlete_id))
             st.rerun()
         else:
             # Cookie is stale — clear it
@@ -1495,24 +1576,27 @@ st.title("🏃 Endurance Analytics Dashboard")
 with st.sidebar:
     st.header("Controls")
 
+    # Load saved preferences (populated after first auth)
+    _prefs = st.session_state.get("_prefs", {})
+
     max_hr = st.number_input(
         "Max HR (bpm)",
         min_value=120,
         max_value=230,
-        value=180,
+        value=int(_prefs.get("max_hr", 180)),
         step=1,
         help="Used to compute intensity = avgHR / maxHR.",
     )
 
     with st.expander("HR Zone Boundaries (% of max HR)"):
         st.caption("Drag to adjust where each zone begins and ends. These boundaries drive both run classification and the zone breakdown chart.")
-        hr_z1 = st.slider("Z1/Z2 boundary", 50, 75, 60, step=1,
+        hr_z1 = st.slider("Z1/Z2 boundary", 50, 75, int(_prefs.get("hr_z1", 60)), step=1,
                           help="Below this = Z1 Recovery") / 100.0
-        hr_z2 = st.slider("Z2/Z3 boundary (Easy threshold)", 65, 88, 80, step=1,
+        hr_z2 = st.slider("Z2/Z3 boundary (Easy threshold)", 65, 88, int(_prefs.get("hr_z2", 80)), step=1,
                           help="Runs with median HR below this are classified as Easy") / 100.0
-        hr_z3 = st.slider("Z3/Z4 boundary (Tempo threshold)", 78, 95, 87, step=1,
+        hr_z3 = st.slider("Z3/Z4 boundary (Tempo threshold)", 78, 95, int(_prefs.get("hr_z3", 87)), step=1,
                           help="Runs with median HR above this are classified as Tempo") / 100.0
-        hr_z4 = st.slider("Z4/Z5 boundary", 85, 100, 93, step=1,
+        hr_z4 = st.slider("Z4/Z5 boundary", 85, 100, int(_prefs.get("hr_z4", 93)), step=1,
                           help="Above this = Z5 VO₂max") / 100.0
         # Clamp to prevent inversions
         hr_z1 = min(hr_z1, hr_z2 - 0.01)
@@ -1520,9 +1604,13 @@ with st.sidebar:
         hr_z4 = max(hr_z4, hr_z3 + 0.01)
         _hr_zones = make_hr_zones(hr_z1, hr_z2, hr_z3, hr_z4)
 
-    race_choice = st.selectbox("Target race distance", list(RACE_PRESETS_KM.keys()), index=2)
+    _race_keys = list(RACE_PRESETS_KM.keys())
+    _saved_race = _prefs.get("race_choice", "Half Marathon")
+    _race_idx = _race_keys.index(_saved_race) if _saved_race in _race_keys else 2
+    race_choice = st.selectbox("Target race distance", _race_keys, index=_race_idx)
     if race_choice == "Custom (km)":
-        race_km = st.number_input("Custom race distance (km)", min_value=1.0, max_value=200.0, value=21.0975, step=0.5)
+        race_km = st.number_input("Custom race distance (km)", min_value=1.0, max_value=200.0,
+                                  value=float(_prefs.get("race_km", 21.0975)), step=0.5)
     else:
         race_km = float(RACE_PRESETS_KM[race_choice])
 
@@ -1532,7 +1620,7 @@ with st.sidebar:
         "HR intensity range (% of max HR)",
         min_value=0.50,
         max_value=1.00,
-        value=(float(lo_def), float(hi_def)),
+        value=(float(_prefs.get("lo_hr", lo_def)), float(_prefs.get("hi_hr", hi_def))),
         step=0.01,
         help="Used in Tab 2 to track efficiency at race-relevant intensity.",
     )
@@ -1543,7 +1631,7 @@ with st.sidebar:
         "Minimum long-run distance (% of race distance)",
         min_value=0.30,
         max_value=1.00,
-        value=float(lr_def),
+        value=float(_prefs.get("long_run_ratio_thresh", lr_def)),
         step=0.05,
         help="Tab 3 considers runs longer than this threshold as 'long runs' for fatigue modeling.",
     )
@@ -1553,7 +1641,7 @@ with st.sidebar:
         "Readiness lookback (days)",
         min_value=14,
         max_value=90,
-        value=42,
+        value=int(_prefs.get("readiness_window_days", 42)),
         step=7,
         help="Tab 4 uses this window to summarize recent risk/readiness.",
     )
@@ -1563,34 +1651,93 @@ with st.sidebar:
         "Race prediction lookback (days)",
         min_value=30,
         max_value=365,
-        value=180,
+        value=int(_prefs.get("prediction_lookback_days", 180)),
         step=15,
         help="Tab 5 uses this window to predict race time.",
     )
 
     st.divider()
     st.subheader("Filters")
-    only_runs = st.checkbox("Only running activities", value=True)
-    exclude_manual = st.checkbox("Exclude manual activities", value=True)
-    exclude_trainer = st.checkbox("Exclude trainer/treadmill", value=False)
+    only_runs = st.checkbox("Only running activities", value=bool(_prefs.get("only_runs", True)))
+    exclude_manual = st.checkbox("Exclude manual activities", value=bool(_prefs.get("exclude_manual", True)))
+    exclude_trainer = st.checkbox("Exclude trainer/treadmill", value=bool(_prefs.get("exclude_trainer", False)))
+
+    st.divider()
+    use_miles = st.toggle("Show distances in miles 🇺🇸", value=bool(_prefs.get("use_miles", False)))
+    show_streams_tab = st.checkbox("🔧 Raw streams explorer", value=False,
+                                   help="Adds a Raw Streams tab to inspect per-second GPS, HR, and cadence data for individual activities.")
     # Date range is added below after activities are loaded
+
+    # Save Settings button (only shown when authenticated)
+    if _OAUTH_ENABLED and "strava_tokens" in st.session_state:
+        st.divider()
+        if st.button("💾 Save Settings", use_container_width=True,
+                     help="Save current sidebar values so they reload next time"):
+            _prefs_to_save = {
+                "max_hr": int(max_hr),
+                "hr_z1": int(hr_z1 * 100), "hr_z2": int(hr_z2 * 100),
+                "hr_z3": int(hr_z3 * 100), "hr_z4": int(hr_z4 * 100),
+                "race_choice": race_choice,
+                "race_km": float(race_km),
+                "lo_hr": float(effort_band[0]), "hi_hr": float(effort_band[1]),
+                "long_run_ratio_thresh": float(long_run_ratio_thresh),
+                "readiness_window_days": int(readiness_window_days),
+                "prediction_lookback_days": int(prediction_lookback_days),
+                "only_runs": bool(only_runs),
+                "exclude_manual": bool(exclude_manual),
+                "exclude_trainer": bool(exclude_trainer),
+                "use_miles": bool(use_miles),
+            }
+            _save_aid = st.session_state.get("strava_athlete_id")
+            if _SUPABASE_ENABLED and _save_aid:
+                _pref_err = sb_save_preferences(_save_aid, _prefs_to_save)
+                if _pref_err:
+                    st.error(f"Save failed: {_pref_err}")
+                else:
+                    st.session_state["_prefs"] = _prefs_to_save
+                    st.success("Settings saved ✓")
+            else:
+                st.session_state["_prefs"] = _prefs_to_save
+                st.success("Settings saved locally ✓")
 
     # Strava connection controls (shown when authenticated)
     if _OAUTH_ENABLED and "strava_tokens" in st.session_state:
         st.divider()
         _athlete_id = st.session_state.get("strava_athlete_id")
+        _athlete_display = st.session_state.get("strava_athlete_name", "")
         if _SUPABASE_ENABLED and _athlete_id:
             _ath_row = sb_load_athlete(_athlete_id)
-            if _ath_row and _ath_row.get("display_name"):
-                st.caption(f"Connected as **{_ath_row['display_name']}**")
+            if _ath_row:
+                _athlete_display = _ath_row.get("display_name", _athlete_display)
+        if _athlete_display:
+            st.caption(f"🔗 Connected as **{_athlete_display}**")
+
+        # Last synced timestamp
         _fetched_at = st.session_state.get("strava_fetched_at", "")
-        if _fetched_at:
+        if _fetched_at == "supabase":
+            # Use the athletes table fetched_at for the real sync time
+            _real_ts = (_ath_row or {}).get("fetched_at", "") if _SUPABASE_ENABLED and _athlete_id else ""
+            if _real_ts:
+                try:
+                    _age = datetime.utcnow() - datetime.fromisoformat(_real_ts.replace("Z", "+00:00").split("+")[0])
+                    _age_str = (f"{int(_age.total_seconds() // 3600)}h ago"
+                                if _age.total_seconds() >= 3600
+                                else f"{int(_age.total_seconds() // 60)}m ago")
+                    st.caption(f"Last synced: {_age_str}")
+                except Exception:
+                    st.caption("Last synced: from cloud")
+            else:
+                st.caption("Last synced: from cloud")
+        elif _fetched_at:
             try:
                 _age = datetime.utcnow() - datetime.fromisoformat(_fetched_at)
-                _age_str = f"{int(_age.total_seconds() // 3600)}h ago" if _age.total_seconds() >= 3600 else f"{int(_age.total_seconds() // 60)}m ago"
-                st.caption(f"Activities last synced: {_age_str}")
+                _age_str = (f"{int(_age.total_seconds() // 3600)}h ago"
+                            if _age.total_seconds() >= 3600
+                            else f"{int(_age.total_seconds() // 60)}m ago")
+                st.caption(f"Last synced: {_age_str}")
             except Exception:
                 pass
+
         _col1, _col2 = st.columns(2)
         if _col1.button("Refresh data", help="Re-fetch all activities from Strava"):
             _refresh_athlete_id = st.session_state.get("strava_athlete_id")
@@ -1607,24 +1754,53 @@ with st.sidebar:
                     pass
             st.rerun()
         if _col2.button("Disconnect"):
-            for _k in ["strava_tokens", "strava_activities", "strava_streams", "gear_details", "strava_fetched_at"]:
+            for _k in ["strava_tokens", "strava_activities", "strava_streams", "gear_details",
+                        "strava_fetched_at", "_auth_persisted", "_prefs"]:
                 st.session_state.pop(_k, None)
+            if _COOKIES_ENABLED and _cookies is not None:
+                try:
+                    _cookies.remove("strava_refresh_token")
+                    _cookies.remove("strava_athlete_id")
+                except Exception:
+                    pass
             st.rerun()
 
 # -----------------------------
 # Load & filter activities
 # -----------------------------
 if _OAUTH_ENABLED and "strava_tokens" not in st.session_state:
-    # Show connect button — no tokens yet
-    st.info("Connect your Strava account to load your activities.")
     _redirect_uri = _strava_secrets.get("redirect_uri", "http://localhost:8501")
     _auth_url = get_strava_auth_url(_STRAVA_CLIENT_ID, _redirect_uri)
+
+    # ── Landing page ─────────────────────────────────────────────────
+    st.markdown("### Your Strava data. Actually analysed.")
+    st.markdown(
+        "This dashboard turns your Strava activities into the kind of insights "
+        "you'd normally need TrainingPeaks or a coach to get — for free."
+    )
+
+    st.markdown("&nbsp;")
+
+    c1, c2, c3 = st.columns(3)
+    c1.markdown("**📈 Training Load**\nSee your fitness, fatigue and form trend over time — and know when you're ready to race or need rest.")
+    c2.markdown("**🎯 Race Prediction**\nGet a personalised finish time prediction with confidence range, based on your actual training data.")
+    c3.markdown("**❤️ HR & Pace Analysis**\nUnderstand your heart rate zones, cadence, pace trends and how your training balance compares to the 80/20 model.")
+
+    st.markdown("&nbsp;")
+
     st.markdown(
         f'<a href="{_auth_url}" target="_self" style="text-decoration:none;">'
-        '<button style="background:#FC4C02;color:white;padding:12px 28px;border:none;'
-        'border-radius:6px;font-size:16px;font-weight:600;cursor:pointer;">'
+        '<button style="background:#FC4C02;color:white;padding:14px 36px;border:none;'
+        'border-radius:6px;font-size:17px;font-weight:700;cursor:pointer;letter-spacing:0.3px;">'
         '🔗 Connect with Strava</button></a>',
         unsafe_allow_html=True,
+    )
+
+    st.markdown("&nbsp;")
+    st.caption(
+        "🔒 **Read-only access** — this app never modifies your Strava data. "
+        "Your activities are loaded once and stored securely. "
+        "You can disconnect at any time from the sidebar."
     )
     st.stop()
 elif _OAUTH_ENABLED and "strava_tokens" in st.session_state:
@@ -1639,13 +1815,19 @@ elif _OAUTH_ENABLED and "strava_tokens" in st.session_state:
     # Persist cookies + Supabase on first stable authenticated render
     if not st.session_state.get("_auth_persisted") and _athlete_id:
         _tokens_now = st.session_state["strava_tokens"]
+        # Set cookies without Secure flag so they work on HTTP (localhost) and HTTPS
         if _COOKIES_ENABLED and _cookies is not None:
-            _cookies.set("strava_refresh_token", _tokens_now["refresh_token"], secure=True, same_site="Lax")
-            _cookies.set("strava_athlete_id", str(_athlete_id), secure=True, same_site="Lax")
+            _cookies.set("strava_refresh_token", _tokens_now["refresh_token"])
+            _cookies.set("strava_athlete_id", str(_athlete_id))
         if _SUPABASE_ENABLED:
             _err = sb_save_athlete(_athlete_id, _athlete_name, _tokens_now["refresh_token"])
             if _err:
                 st.session_state["_sb_save_error"] = f"athlete: {_err}"
+        # Load preferences if not already loaded
+        if _SUPABASE_ENABLED and "_prefs" not in st.session_state:
+            _prefs_loaded = sb_load_preferences(_athlete_id)
+            if _prefs_loaded:
+                st.session_state["_prefs"] = _prefs_loaded
         st.session_state["_auth_persisted"] = True
 
     # Load activities: Supabase → disk cache → Strava API (in priority order)
@@ -1699,18 +1881,20 @@ elif _OAUTH_ENABLED and "strava_tokens" in st.session_state:
     activities = parse_activities_raw(st.session_state["strava_activities"])
     streams_by_id: Dict[int, Dict] = st.session_state.get("strava_streams", {})
 else:
-    # Static file fallback
+    # Static file fallback (local dev without OAuth configured)
     try:
         activities = load_activities(ACTIVITIES_PATH)
     except FileNotFoundError:
-        st.error(f"Activities file not found: `{ACTIVITIES_PATH}`. Run the data pipeline first.")
+        st.error(
+            "⚠️ Strava connection not configured. "
+            "Add your Strava API credentials to `.streamlit/secrets.toml` to connect your account."
+        )
         st.stop()
 
     try:
         streams_by_id = load_streams(STREAMS_PATH)
     except FileNotFoundError:
-        st.error(f"Streams file not found: `{STREAMS_PATH}`. Run the data pipeline first.")
-        st.stop()
+        streams_by_id = {}
 
 if only_runs:
     activities = activities[activities["type"].astype(str).str.lower() == "run"]
@@ -1739,6 +1923,11 @@ with st.sidebar:
         min_value=min_dt.date(),
         max_value=max_dt.date(),
         label_visibility="collapsed",
+    )
+    st.caption(
+        "💡 Detailed stream data (HR, cadence, pace) is fetched and saved "
+        "for activities in this range. Widen the range to unlock analysis "
+        "for older runs — each run is only fetched once."
     )
 
 if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -1844,7 +2033,7 @@ with tab_overview:
     # ── All-time KPIs ────────────────────────────────────────────────
     o1, o2, o3, o4, o5 = st.columns(5)
     o1.metric("Total runs", f"{consistency['total_runs']:,}")
-    o2.metric("Total distance", f"{consistency['total_km']:,.0f} km")
+    o2.metric("Total distance", _dist_fmt(consistency['total_km'], use_miles, decimals=0))
     o3.metric("Week streak", f"{consistency['week_streak']} wks",
               help="Consecutive weeks with at least one run.")
     o4.metric("Consistent weeks (last 12)", f"{consistency['pct_consistent_weeks']:.0f}%",
@@ -1857,9 +2046,52 @@ with tab_overview:
 
     st.divider()
 
+    # ── Data completeness indicator ───────────────────────────────────
+    st.subheader("Data quality — selected period")
+    _n_total = len(df_range)
+    _n_hr    = int(df_range["avg_hr"].notna().sum())
+    _n_strm  = int(df_range["id"].astype(int).isin(streams_by_id.keys()).sum())
+    _n_gps   = int(df_range["start_latlng"].notna().sum()) if "start_latlng" in df_range.columns else 0
+    _n_elev  = int((df_range["total_elevation_gain"].fillna(0) > 0).sum()) if "total_elevation_gain" in df_range.columns else 0
+
+    def _qual_color(pct: float) -> str:
+        if pct >= 80: return "#2ca02c"
+        if pct >= 50: return "#fd8d3c"
+        return "#d62728"
+
+    def _qual_badge(label: str, n: int, total: int, tip: str) -> str:
+        pct = n / total * 100 if total > 0 else 0
+        c = _qual_color(pct)
+        icon = "✓" if pct >= 80 else ("△" if pct >= 50 else "✗")
+        return (
+            f"<div style='flex:1;text-align:center;padding:10px 6px;border-radius:8px;"
+            f"border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.03)'>"
+            f"<div style='font-size:1.4rem;font-weight:700;color:{c}'>{icon} {pct:.0f}%</div>"
+            f"<div style='font-size:0.78rem;color:rgba(255,255,255,0.7);margin-top:2px'>{label}</div>"
+            f"<div style='font-size:0.7rem;color:rgba(255,255,255,0.4)'>{n}/{total} runs</div>"
+            f"<div style='font-size:0.68rem;color:rgba(255,255,255,0.35);margin-top:3px'>{tip}</div>"
+            f"</div>"
+        )
+
+    _badges = [
+        _qual_badge("Heart Rate", _n_hr, _n_total, "Needed for training load, zones & classification"),
+        _qual_badge("Streams / GPS", _n_strm, _n_total, "Needed for cadence, GAP & HR zone detail"),
+        _qual_badge("GPS Location", _n_gps, _n_total, "Needed for route maps & weather overlay"),
+        _qual_badge("Elevation", _n_elev, _n_total, "Needed for grade-adjusted pace (GAP)"),
+    ]
+    st.markdown(
+        f"<div style='display:flex;gap:10px;margin-bottom:4px'>{''.join(_badges)}</div>"
+        f"<div style='font-size:0.72rem;color:rgba(255,255,255,0.35);margin-top:4px'>"
+        f"Based on {_n_total} runs in the selected date range. "
+        f"Widen the date range and click <b>Refresh data</b> to fetch missing streams.</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+
     # ── Training calendar heatmap ─────────────────────────────────────
     st.subheader("Training calendar — last 12 months")
-    fig_cal = build_calendar_heatmap(activities)
+    fig_cal = build_calendar_heatmap(activities, use_miles=use_miles)
     st.plotly_chart(fig_cal, use_container_width=True)
     # Colour legend
     legend_html = " &nbsp; ".join(
@@ -1886,12 +2118,71 @@ with tab_overview:
             b = bests[key]
             dt_str = pd.to_datetime(b["date"]).strftime("%b %Y")
             if key == "longest_run":
-                col.metric(label, f"{b['distance_km']:.1f} km", dt_str)
+                col.metric(label, _dist_fmt(b['distance_km'], use_miles), dt_str)
             else:
-                col.metric(label, _format_min_per_km(b["pace_min_per_km"]),
-                           f"{b['distance_km']:.1f} km · {dt_str}")
+                col.metric(label, _format_pace(b["pace_min_per_km"], use_miles),
+                           f"{_dist_fmt(b['distance_km'], use_miles)} · {dt_str}")
         else:
             col.metric(label, "—", "No qualifying run yet")
+
+    st.divider()
+
+    # ── Week-by-week training summary ─────────────────────────────────
+    st.subheader("Weekly training log")
+    st.caption("One row per week in the selected date range. Quality = Tempo / Workout / Race sessions.")
+
+    _wlog = df_range.copy()
+    _wlog["week_start"] = _wlog["start_dt_local"].dt.to_period("W-MON").apply(lambda p: p.start_time)
+
+    _wlog_grp = _wlog.groupby("week_start", as_index=False).agg(
+        runs=("id", "count"),
+        distance_km=("distance_km", "sum"),
+        duration_min=("duration_min", "sum"),
+        long_run_km=("distance_km", "max"),
+        avg_hr=("avg_hr", "mean"),
+        elev_gain=("total_elevation_gain", "sum"),
+    )
+
+    # Quality run count per week
+    if "run_type" in _wlog.columns:
+        _q_wk = (
+            _wlog[_wlog["run_type"].isin(["Tempo", "Workout", "Race"])]
+            .groupby("week_start").size().reset_index(name="quality")
+        )
+        _wlog_grp = _wlog_grp.merge(_q_wk, on="week_start", how="left")
+        _wlog_grp["quality"] = _wlog_grp["quality"].fillna(0).astype(int)
+    else:
+        _wlog_grp["quality"] = 0
+
+    # Format for display
+    _wlog_grp = _wlog_grp.sort_values("week_start", ascending=False)
+    _wlog_disp = pd.DataFrame()
+    _wlog_disp["Week"] = _wlog_grp["week_start"].dt.strftime("%b %d, %Y")
+    _wlog_disp["Runs"] = _wlog_grp["runs"].astype(int)
+    _wlog_disp[f"Distance ({_d_unit(use_miles)})"] = _wlog_grp["distance_km"].apply(
+        lambda x: round(_to_display_dist(x, use_miles), 1)
+    )
+    _wlog_disp["Time"] = _wlog_grp["duration_min"].apply(
+        lambda m: f"{int(m // 60)}h {int(m % 60):02d}m" if pd.notna(m) and m > 0 else "—"
+    )
+    # Avg pace = total time / total distance
+    _avg_pace_mkm = (_wlog_grp["duration_min"] / _wlog_grp["distance_km"]).replace([np.inf, -np.inf], np.nan)
+    _wlog_disp[f"Avg pace ({_p_unit(use_miles)})"] = _avg_pace_mkm.apply(
+        lambda x: _format_pace(x, use_miles) if pd.notna(x) else "—"
+    )
+    _wlog_disp[f"Long run ({_d_unit(use_miles)})"] = _wlog_grp["long_run_km"].apply(
+        lambda x: _dist_fmt(x, use_miles) if pd.notna(x) else "—"
+    )
+    _wlog_disp["Quality"] = _wlog_grp["quality"].apply(lambda x: f"{int(x)} 🔥" if x > 0 else "—")
+    _wlog_disp["Avg HR"] = _wlog_grp["avg_hr"].apply(
+        lambda x: f"{int(round(x))} bpm" if pd.notna(x) and x > 0 else "—"
+    )
+    if "total_elevation_gain" in df_range.columns:
+        _wlog_disp["Elev gain (m)"] = _wlog_grp["elev_gain"].apply(
+            lambda x: f"{int(x):,}" if pd.notna(x) and x > 0 else "—"
+        )
+
+    st.dataframe(_wlog_disp, hide_index=True, use_container_width=True)
 
     st.divider()
 
@@ -1936,84 +2227,88 @@ with tab_overview:
 # =====================================================================
 
 with tab_streams:
-    st.subheader("Strava Streams Explorer")
-    st.caption("Inspect per-second/per-sample streams (pace, HR, cadence, grade, etc.) for individual activities.")
-
-    # Ensure we have streams
-    if not isinstance(streams_by_id, dict) or len(streams_by_id) == 0:
-        st.warning("No streams found in streams file.")
+    if not show_streams_tab:
+        st.info("Enable **🔧 Raw streams explorer** in the sidebar to use this tab.")
     else:
-        # Build a nice label: date — name — distance
-        df_act = df_range.copy()
-        df_act["date_str"] = df_act["start_dt_local"].dt.strftime("%Y-%m-%d")
-        df_act["label"] = df_act["date_str"].astype(str) + " — " + df_act["name"].fillna("").astype(str).str.slice(0, 50) + " — " + df_act["distance_km"].fillna(0).map(lambda x: f"{x:.1f} km")
+        st.subheader("Strava Streams Explorer")
+        st.caption("Inspect per-second/per-sample streams (pace, HR, cadence, grade, etc.) for individual activities.")
 
-        # Keep only activities that have streams available
-        df_act["has_streams"] = df_act["id"].astype(int).isin(streams_by_id.keys())
-        df_streamable = df_act[df_act["has_streams"]].sort_values("start_dt_local", ascending=False)
-
-        if len(df_streamable) == 0:
-            st.info("No activities with streams available in the selected date range. Try widening the date range.")
+        if not isinstance(streams_by_id, dict) or len(streams_by_id) == 0:
+            st.warning("No streams found in streams file.")
         else:
-            # Select activity by label but map to id
-            label_to_id = dict(zip(df_streamable["label"], df_streamable["id"].astype(int)))
-            selected_label = st.selectbox("Activity", list(label_to_id.keys()))
-            activity_id = label_to_id[selected_label]
+            # Build a nice label: date — name — distance
+            df_act = df_range.copy()
+            df_act["date_str"] = df_act["start_dt_local"].dt.strftime("%Y-%m-%d")
+            df_act["label"] = (df_act["date_str"].astype(str) + " — " +
+                               df_act["name"].fillna("").astype(str).str.slice(0, 50) + " — " +
+                               df_act["distance_km"].fillna(0).map(lambda x: _dist_fmt(x, use_miles)))
 
-            streams = streams_by_id.get(int(activity_id), {})
-            df = streams_to_df(streams)
+            # Keep only activities that have streams available
+            df_act["has_streams"] = df_act["id"].astype(int).isin(streams_by_id.keys())
+            df_streamable = df_act[df_act["has_streams"]].sort_values("start_dt_local", ascending=False)
 
-            # Choose x-axis
-            x_options = []
-            for col in ["time", "distance", "distance_km"]:
-                if col in df.columns:
-                    x_options.append(col)
-
-            if not x_options:
-                st.error("No 'time' or 'distance' stream found for this activity.")
+            if len(df_streamable) == 0:
+                st.info("No activities with streams available in the selected date range. Try widening the date range.")
             else:
-                default_x = "distance_km" if "distance_km" in x_options else x_options[0]
-                x_axis = st.radio("X axis", x_options, horizontal=True, index=x_options.index(default_x))
+                # Select activity by label but map to id
+                label_to_id = dict(zip(df_streamable["label"], df_streamable["id"].astype(int)))
+                selected_label = st.selectbox("Activity", list(label_to_id.keys()))
+                activity_id = label_to_id[selected_label]
 
-                # y-axis candidates: numeric columns excluding x and lat/lng
-                exclude = set(["lat", "lng"]) | set(x_options)
-                y_candidates = [c for c in df.columns if c not in exclude]
+                streams = streams_by_id.get(int(activity_id), {})
+                df = streams_to_df(streams)
 
-                numeric_cols = []
-                for c in y_candidates:
-                    s = pd.to_numeric(df[c], errors="coerce")
-                    if s.notna().any():
-                        numeric_cols.append(c)
+                # Choose x-axis
+                x_options = []
+                for col in ["time", "distance", "distance_km"]:
+                    if col in df.columns:
+                        x_options.append(col)
 
-                if not numeric_cols:
-                    st.error("No numeric metrics available to plot for this activity.")
+                if not x_options:
+                    st.error("No 'time' or 'distance' stream found for this activity.")
                 else:
-                    default_metric = "pace_min_per_km" if "pace_min_per_km" in numeric_cols else ("heartrate" if "heartrate" in numeric_cols else numeric_cols[0])
-                    metric = st.selectbox("Metric (Y axis)", numeric_cols, index=numeric_cols.index(default_metric))
+                    default_x = "distance_km" if "distance_km" in x_options else x_options[0]
+                    x_axis = st.radio("X axis", x_options, horizontal=True, index=x_options.index(default_x))
 
-                    smooth_window = st.slider("Rolling mean window", 1, 200, 1, help="Window size for rolling mean calculation.")
-                    plot_df = df.copy()
-                    plot_df[metric] = pd.to_numeric(plot_df[metric], errors="coerce")
-                    plot_df[x_axis] = pd.to_numeric(plot_df[x_axis], errors="coerce")
+                    # y-axis candidates: numeric columns excluding x and lat/lng
+                    exclude = set(["lat", "lng"]) | set(x_options)
+                    y_candidates = [c for c in df.columns if c not in exclude]
 
-                    if smooth_window > 1:
-                        plot_df[metric] = plot_df[metric].rolling(smooth_window, min_periods=1).mean()
+                    numeric_cols = []
+                    for c in y_candidates:
+                        s = pd.to_numeric(df[c], errors="coerce")
+                        if s.notna().any():
+                            numeric_cols.append(c)
 
-                    plot_df = plot_df.dropna(subset=[x_axis, metric])
+                    if not numeric_cols:
+                        st.error("No numeric metrics available to plot for this activity.")
+                    else:
+                        default_metric = "pace_min_per_km" if "pace_min_per_km" in numeric_cols else ("heartrate" if "heartrate" in numeric_cols else numeric_cols[0])
+                        metric = st.selectbox("Metric (Y axis)", numeric_cols, index=numeric_cols.index(default_metric))
 
-                    fig = px.line(
-                        plot_df,
-                        x=x_axis,
-                        y=metric,
-                        title=f"Activity {activity_id}: {metric} vs {x_axis}",
-                    )
-                    fig.update_layout(height=600)
+                        smooth_window = st.slider("Rolling mean window", 1, 200, 1, help="Window size for rolling mean calculation.")
+                        plot_df = df.copy()
+                        plot_df[metric] = pd.to_numeric(plot_df[metric], errors="coerce")
+                        plot_df[x_axis] = pd.to_numeric(plot_df[x_axis], errors="coerce")
 
-                    # Invert pace axis (lower is better)
-                    if metric == "pace_min_per_km":
-                        fig.update_yaxes(autorange="reversed")
+                        if smooth_window > 1:
+                            plot_df[metric] = plot_df[metric].rolling(smooth_window, min_periods=1).mean()
 
-                    st.plotly_chart(fig, use_container_width=True)
+                        plot_df = plot_df.dropna(subset=[x_axis, metric])
+
+                        fig = px.line(
+                            plot_df,
+                            x=x_axis,
+                            y=metric,
+                            title=f"Activity {activity_id}: {metric} vs {x_axis}",
+                        )
+                        fig.update_layout(height=600)
+
+                        # Invert pace axis (lower is better)
+                        if metric == "pace_min_per_km":
+                            fig.update_yaxes(autorange="reversed")
+
+                        st.plotly_chart(fig, use_container_width=True)
 
 # =====================================================================
 # TAB 1 - Training Load
@@ -2022,7 +2317,11 @@ with tab1:
     daily, weekly = daily_all, weekly_all
 
     if len(daily) == 0 or len(weekly) == 0:
-        st.info("Not enough data in the selected range to compute load.")
+        st.info("Not enough data in the selected range to compute training load.")
+        st.markdown(
+            "**To see this tab:** Make sure your date range includes at least **4 weeks** of runs with "
+            "heart rate data recorded. Expand your date range in the sidebar or sync more activities."
+        )
     else:
         # ── KPI row ─────────────────────────────────────────────────
         weekly = weekly.copy()
@@ -2035,9 +2334,11 @@ with tab1:
         latest_day  = daily.sort_values("date_ts").iloc[-1]
         acwr_label, acwr_emoji = acwr_band(float(latest_day["acwr"]) if pd.notna(latest_day["acwr"]) else np.nan)
 
+        _wk_dist = _to_display_dist(latest_week["weekly_distance_km"], use_miles)
+        _prev_dist = _to_display_dist(prev_week["weekly_distance_km"], use_miles) if prev_week is not None else None
         dist_delta = (
-            f"{latest_week['weekly_distance_km'] - prev_week['weekly_distance_km']:+.1f} km vs last wk"
-            if prev_week is not None else None
+            f"{_wk_dist - _prev_dist:+.1f} {_d_unit(use_miles)} vs last wk"
+            if _prev_dist is not None else None
         )
         load_delta = (
             f"{latest_week['weekly_load_hr'] - prev_week['weekly_load_hr']:+.1f} vs last wk"
@@ -2045,7 +2346,7 @@ with tab1:
         )
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Weekly distance", f"{latest_week['weekly_distance_km']:.1f} km", dist_delta)
+        k1.metric("Weekly distance", f"{_wk_dist:.1f} {_d_unit(use_miles)}", dist_delta)
         k2.metric("Weekly HR load", f"{latest_week['weekly_load_hr']:.1f}", load_delta,
                   help="load = duration_min × (avgHR / maxHR). Only runs with HR data contribute.")
         k3.metric("ACWR", f"{latest_day['acwr']:.2f}" if pd.notna(latest_day["acwr"]) else "N/A",
@@ -2069,11 +2370,19 @@ with tab1:
 
         # TSB form-zone bands
         pmc_fig.add_hrect(y0=5, y1=25, fillcolor="rgba(82,232,138,0.08)", line_width=0,
-                          annotation_text="Race-ready zone", annotation_position="top left",
-                          annotation=dict(font_size=11, font_color="rgba(82,232,138,0.6)"))
-        pmc_fig.add_hrect(y0=-30, y1=5, fillcolor="rgba(253,141,60,0.05)", line_width=0)
-        pmc_fig.add_hrect(y0=-100, y1=-30, fillcolor="rgba(214,39,40,0.07)", line_width=0)
-        pmc_fig.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)", line_width=1)
+                          annotation_text="🏁 Race-ready", annotation_position="top left",
+                          annotation=dict(font_size=11, font_color="rgba(82,232,138,0.7)"),
+                          yref="y2")
+        pmc_fig.add_hrect(y0=-30, y1=5, fillcolor="rgba(253,141,60,0.05)", line_width=0,
+                          annotation_text="⚡ Productive training", annotation_position="top left",
+                          annotation=dict(font_size=11, font_color="rgba(253,141,60,0.6)"),
+                          yref="y2")
+        pmc_fig.add_hrect(y0=-100, y1=-30, fillcolor="rgba(214,39,40,0.07)", line_width=0,
+                          annotation_text="😓 High fatigue — recover", annotation_position="top left",
+                          annotation=dict(font_size=11, font_color="rgba(214,39,40,0.6)"),
+                          yref="y2")
+        pmc_fig.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)", line_width=1,
+                          yref="y2")
 
         # CTL, ATL on left axis
         pmc_fig.add_trace(go.Scatter(
@@ -2097,10 +2406,21 @@ with tab1:
             margin=dict(l=10, r=60, t=10, b=10),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             xaxis_title="Date",
-            yaxis=dict(title="Load (a.u.)", side="left"),
-            yaxis2=dict(title="TSB (Form)", overlaying="y", side="right", showgrid=False,
+            yaxis=dict(title="Fitness / Fatigue (a.u.)", side="left"),
+            yaxis2=dict(title="Form / TSB", overlaying="y", side="right", showgrid=False,
                         zeroline=False),
             hovermode="x unified",
+        )
+        # "You are here" marker on current TSB
+        _today_row = daily.sort_values("date_ts").iloc[-1]
+        _today_tsb_val = float(_today_row["tsb"]) if pd.notna(_today_row["tsb"]) else 0.0
+        pmc_fig.add_annotation(
+            x=_today_row["date_ts"], y=_today_tsb_val,
+            text=f"Today<br>TSB {_today_tsb_val:+.0f}",
+            showarrow=True, arrowhead=2, arrowcolor="#6baed6",
+            font=dict(size=10, color="#6baed6"),
+            bgcolor="rgba(20,20,30,0.7)", bordercolor="#6baed6", borderwidth=1,
+            ax=40, ay=-40, yref="y2",
         )
         st.plotly_chart(pmc_fig, use_container_width=True)
 
@@ -2119,27 +2439,6 @@ with tab1:
 
         st.divider()
 
-        # ── Original acute/chronic chart (kept as reference) ─────────
-        st.subheader("Fitness vs fatigue (acute & chronic load)")
-        fig_load = go.Figure()
-        fig_load.add_trace(go.Scatter(
-            x=pd.concat([daily["date_ts"], daily["date_ts"].iloc[::-1]]),
-            y=pd.concat([daily["chronic_load"] * 1.3, (daily["chronic_load"] * 0.8).iloc[::-1]]),
-            fill="toself", fillcolor="rgba(0,200,100,0.10)", line=dict(width=0),
-            name="Balanced zone (ACWR 0.8–1.3)", hoverinfo="skip",
-        ))
-        fig_load.add_trace(go.Scatter(x=daily["date_ts"], y=daily["acute_load"],  mode="lines", name="Acute load (7d EWMA)"))
-        fig_load.add_trace(go.Scatter(x=daily["date_ts"], y=daily["chronic_load"], mode="lines", name="Chronic load (28d EWMA)"))
-        fig_load.update_layout(
-            height=300,
-            margin=dict(l=10, r=10, t=10, b=10),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            xaxis_title="Date",
-            yaxis_title="HR Load (a.u.)",
-        )
-        st.plotly_chart(fig_load, use_container_width=True)
-
-        st.divider()
 
         # ── Training polarization ─────────────────────────────────────
         st.subheader("Training balance")
@@ -2170,15 +2469,17 @@ with tab1:
                     st.error("Very high quality load. Reduce intensity to avoid burnout.")
 
             with pol_c2:
+                _type_disp = type_km * (KM_TO_MILES if use_miles else 1.0)
+                _dist_unit = "mi" if use_miles else "km"
                 fig_pol = go.Figure(go.Bar(
-                    x=type_km.index, y=type_km.values,
-                    marker_color=[RUN_TYPE_COLORS[t] for t in type_km.index],
-                    text=[f"{v:.1f} km" for v in type_km.values],
+                    x=_type_disp.index, y=_type_disp.values,
+                    marker_color=[RUN_TYPE_COLORS[t] for t in _type_disp.index],
+                    text=[f"{v:.1f} {_dist_unit}" for v in _type_disp.values],
                     textposition="outside",
                 ))
                 fig_pol.update_layout(
                     height=300, title="Distance by run type (selected range)",
-                    xaxis_title="", yaxis_title="km",
+                    xaxis_title="", yaxis_title="mi" if use_miles else "km",
                     margin=dict(l=10, r=10, t=40, b=10), showlegend=False,
                 )
                 st.plotly_chart(fig_pol, use_container_width=True)
@@ -2187,6 +2488,8 @@ with tab1:
 
         # ── Weekly volume stacked by type ────────────────────────────
         st.subheader("Weekly volume")
+        _dist_unit = "mi" if use_miles else "km"
+        _dist_factor = KM_TO_MILES if use_miles else 1.0
         if "run_type" in df_range.columns:
             df_range["week_start_col"] = df_range["start_dt_local"].dt.to_period("W").apply(
                 lambda p: p.start_time
@@ -2197,11 +2500,12 @@ with tab1:
                 .reset_index()
                 .rename(columns={"week_start_col": "week_start"})
             )
+            weekly_by_type["distance_disp"] = weekly_by_type["distance_km"] * _dist_factor
             fig_weekly_dist = px.bar(
-                weekly_by_type, x="week_start", y="distance_km", color="run_type",
+                weekly_by_type, x="week_start", y="distance_disp", color="run_type",
                 color_discrete_map=RUN_TYPE_COLORS,
-                title="Weekly distance by run type (km)",
-                labels={"week_start": "Week", "distance_km": "km", "run_type": "Type"},
+                title=f"Weekly distance by run type ({_dist_unit})",
+                labels={"week_start": "Week", "distance_disp": _dist_unit, "run_type": "Type"},
                 category_orders={"run_type": list(RUN_TYPE_COLORS.keys())},
             )
             fig_weekly_dist.update_layout(
@@ -2210,56 +2514,99 @@ with tab1:
             )
             st.plotly_chart(fig_weekly_dist, use_container_width=True)
         else:
+            _weekly_disp = weekly.copy()
+            _weekly_disp["distance_disp"] = _weekly_disp["weekly_distance_km"] * _dist_factor
             fig_weekly_dist = px.bar(
-                weekly, x="week_start", y="weekly_distance_km",
-                title="Weekly distance (km)",
-                labels={"week_start": "Week", "weekly_distance_km": "km"},
+                _weekly_disp, x="week_start", y="distance_disp",
+                title=f"Weekly distance ({_dist_unit})",
+                labels={"week_start": "Week", "distance_disp": _dist_unit},
             )
             fig_weekly_dist.update_layout(height=340, margin=dict(l=10, r=10, t=40, b=10))
             st.plotly_chart(fig_weekly_dist, use_container_width=True)
-
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            fig_ratios = go.Figure()
-            fig_ratios.add_trace(go.Bar(x=weekly["week_start"], y=weekly["weekly_distance_ratio"], name="Weekly / race dist"))
-            fig_ratios.add_trace(go.Bar(x=weekly["week_start"], y=weekly["long_run_ratio"], name="Long run / race dist"))
-            fig_ratios.update_layout(
-                barmode="group", height=300, title="Race-normalized volume",
-                margin=dict(l=10, r=10, t=40, b=10), xaxis_title="Week", yaxis_title="Ratio",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            )
-            st.plotly_chart(fig_ratios, use_container_width=True)
 
         st.divider()
 
         # ── HR zone breakdown ────────────────────────────────────────
         st.subheader("Heart rate zone breakdown")
+        st.caption(
+            "Time spent in each HR zone, calculated from per-second stream data where available. "
+            "Elite endurance athletes spend ~80% of their time in Z1–Z2."
+        )
         zone_df = compute_hr_zones(df_range, streams_by_id, int(max_hr), hr_zones=_hr_zones)
         zone_df = zone_df[zone_df["Minutes"] > 0]
         if len(zone_df) == 0:
             st.info("No HR data available in the selected range to compute zones.")
         else:
             zone_colors = ["#6baed6", "#74c476", "#fd8d3c", "#e6550d", "#d62728"]
+            zone_descriptions = {
+                "Z1 Recovery":  "Very easy — active recovery, cool-downs",
+                "Z2 Aerobic":   "Comfortable — conversational pace, fat-burning base",
+                "Z3 Tempo":     "Moderate — marathon to half-marathon effort",
+                "Z4 Threshold": "Hard — 10K race effort, lactate threshold",
+                "Z5 VO₂max":   "Maximum — short intervals, 5K race effort",
+            }
+            zone_df["Description"] = zone_df["Zone"].map(zone_descriptions).fillna("")
+            zone_df["Hours"] = (zone_df["Minutes"] / 60).round(1)
+            zone_df["Pct"] = (zone_df["Minutes"] / zone_df["Minutes"].sum() * 100).round(1)
+
+            _zone_feelings = {
+                "Z1 Recovery": "Recovery", "Z2 Aerobic": "Easy / Base",
+                "Z3 Tempo": "Comfortably hard", "Z4 Threshold": "Race effort",
+                "Z5 VO₂max": "Max intensity",
+            }
+            zone_df["Feeling"] = zone_df["Zone"].map(_zone_feelings).fillna("")
             fig_zones = px.bar(
                 zone_df, x="Zone", y="Minutes",
-                title="Time in HR zones (selected range)",
                 color="Zone",
                 color_discrete_sequence=zone_colors,
                 labels={"Minutes": "Time (min)"},
+                custom_data=["Description", "Hours", "Pct", "Feeling"],
+                text="Feeling",
             )
-            fig_zones.update_layout(height=320, margin=dict(l=10, r=10, t=50, b=10), showlegend=False)
+            fig_zones.update_traces(
+                hovertemplate="<b>%{x}</b><br>%{customdata[0]}<br>%{y:.0f} min (%{customdata[2]:.1f}%)<extra></extra>",
+                textposition="outside",
+                textfont=dict(size=10),
+            )
+            fig_zones.update_layout(height=340, margin=dict(l=10, r=10, t=40, b=10), showlegend=False,
+                                    uniformtext_minsize=8, uniformtext_mode="hide")
             st.plotly_chart(fig_zones, use_container_width=True)
+
             total_min = zone_df["Minutes"].sum()
+            z1z2_pct = float(zone_df.loc[zone_df["Zone"].isin(["Z1 Recovery", "Z2 Aerobic"]), "Minutes"].sum()) / total_min * 100 if total_min > 0 else 0
             z2_pct = float(zone_df.loc[zone_df["Zone"] == "Z2 Aerobic", "Minutes"].sum()) / total_min * 100 if total_min > 0 else 0
-            st.caption(
-                f"Z2 (aerobic base) accounts for **{z2_pct:.0f}%** of your HR-tracked time. "
-                "Most endurance coaches target 70–80% of training in Z1–Z2."
-            )
+
+            if z1z2_pct >= 75:
+                st.success(f"**{z1z2_pct:.0f}%** of training in Z1–Z2 ✓ — well within the 80/20 polarized model. Z2 alone: {z2_pct:.0f}%.")
+            elif z1z2_pct >= 60:
+                st.warning(f"**{z1z2_pct:.0f}%** in Z1–Z2 — slightly high intensity. Try adding more easy runs to reach 75–80%.")
+            else:
+                st.error(f"Only **{z1z2_pct:.0f}%** in Z1–Z2 — training hard. Add easy days to avoid accumulated fatigue.")
+
+            # Zone reference table
+            with st.expander("Zone reference guide"):
+                _zone_bpm_rows = []
+                for (zname, lo_frac, hi_frac) in _hr_zones:
+                    lo_bpm = int(lo_frac * max_hr)
+                    hi_bpm = int(min(hi_frac, 1.0) * max_hr)
+                    _zone_bpm_rows.append({
+                        "Zone": zname,
+                        "BPM range": f"{lo_bpm}–{hi_bpm}" if hi_frac < 2 else f">{lo_bpm}",
+                        "Feel": zone_descriptions.get(zname, ""),
+                        "Training purpose": {
+                            "Z1 Recovery": "Active recovery, blood flow, easy distance",
+                            "Z2 Aerobic": "Aerobic base, mitochondrial density, fat adaptation",
+                            "Z3 Tempo": "Lactate clearance, marathon fitness, 'comfortably hard'",
+                            "Z4 Threshold": "Raise lactate threshold, 10K–HM race pace",
+                            "Z5 VO₂max": "Maximal oxygen uptake, short sharp intervals",
+                        }.get(zname, ""),
+                    })
+                st.dataframe(pd.DataFrame(_zone_bpm_rows), hide_index=True, use_container_width=True)
 
         st.divider()
 
         # ── Advanced load metrics (collapsed by default) ─────────────
-        with st.expander("Advanced load metrics — monotony & strain"):
+        with st.expander("Advanced metrics (for coaches) — monotony & strain"):
             st.caption("Monotony = mean daily load ÷ std. Strain = weekly load × monotony. High monotony with high load = little variation in a big week — watch recovery.")
             r1, r2 = st.columns(2)
             with r1:
@@ -2298,6 +2645,12 @@ with tab2:
 
         lo, hi = effort_band
         d2["in_race_effort_band"] = (d2["hr_intensity"] >= lo) & (d2["hr_intensity"] <= hi)
+        # Compute display-unit columns once so all charts below stay consistent
+        _pace_factor = (1.0 / KM_TO_MILES) if use_miles else 1.0
+        d2["pace_disp"]     = d2["pace_min_per_km"] * _pace_factor
+        d2["distance_disp"] = d2["distance_km"] * (KM_TO_MILES if use_miles else 1.0)
+        _pace_lbl = f"Pace ({_p_unit(use_miles)})"
+        _dist_lbl = f"Distance ({_d_unit(use_miles)})"
 
         d2["speed_per_hr"] = d2["avg_speed_mps"] / d2["avg_hr"]
         d2["hr_per_km"] = d2["avg_hr"] * d2["pace_min_per_km"]
@@ -2308,7 +2661,7 @@ with tab2:
         top = st.columns(4)
         top[0].metric("Runs in range", f"{len(d2)}")
         top[1].metric("In race-effort band", f"{len(race_eff)}", help=f"HR band = {lo:.0%}–{hi:.0%} of max HR")
-        top[2].metric("Median pace", _format_min_per_km(float(d2["pace_min_per_km"].median())))
+        top[2].metric("Median pace", _format_pace(float(d2["pace_min_per_km"].median()), use_miles))
         top[3].metric("Median HR", f"{int(round(d2['avg_hr'].median()))} bpm")
 
         if len(race_eff) == 0:
@@ -2328,14 +2681,14 @@ with tab2:
             fig_scatter = px.scatter(
                 d2,
                 x="avg_hr",
-                y="pace_min_per_km",
+                y="pace_disp",
                 color=scatter_color,
                 color_discrete_map=scatter_cmap,
                 trendline="ols",
                 trendline_color_override="white",
-                hover_data=["name", "start_dt_local", "distance_km", "duration_min", "total_elevation_gain", "hr_intensity"],
-                labels={"avg_hr": "Average HR (bpm)", "pace_min_per_km": "Pace (min/km)",
-                        "run_type": "Type", "distance_km": "Distance (km)"},
+                hover_data=["name", "start_dt_local", "distance_disp", "duration_min", "total_elevation_gain", "hr_intensity"],
+                labels={"avg_hr": "Average HR (bpm)", "pace_disp": _pace_lbl,
+                        "run_type": "Type", "distance_disp": _dist_lbl},
                 title="Pace vs HR — coloured by run type",
                 category_orders={"run_type": list(RUN_TYPE_COLORS.keys())},
             )
@@ -2346,10 +2699,10 @@ with tab2:
         with c2:
             fig_dist = px.histogram(
                 d2,
-                x="pace_min_per_km",
+                x="pace_disp",
                 nbins=25,
                 title="Pace distribution",
-                labels={"pace_min_per_km": "Pace (min/km)", "count": "Runs"},
+                labels={"pace_disp": _pace_lbl, "count": "Runs"},
             )
             fig_dist.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
             fig_dist.update_xaxes(autorange="reversed")
@@ -2362,37 +2715,51 @@ with tab2:
 
         trend_df["speed_per_hr_roll"] = trend_df["speed_per_hr"].rolling(window=5, min_periods=1).median()
         trend_df["pace_roll"] = trend_df["pace_min_per_km"].rolling(window=5, min_periods=1).median()
+        trend_df["pace_disp"] = trend_df["pace_min_per_km"] * _pace_factor
+        trend_df["pace_roll_disp"] = trend_df["pace_roll"] * _pace_factor
 
-        t1, t2c = st.columns(2)
-
-        with t1:
-            fig_eff = go.Figure()
-            fig_eff.add_trace(go.Scatter(x=trend_df["start_dt_local"], y=trend_df["speed_per_hr"], mode="markers", name="Speed/HR"))
-            fig_eff.add_trace(go.Scatter(x=trend_df["start_dt_local"], y=trend_df["speed_per_hr_roll"], mode="lines", name="Rolling median (5 runs)"))
-            fig_eff.update_layout(
-                height=320,
-                title="Efficiency index (speed ÷ HR)",
-                xaxis_title="Date",
-                yaxis_title="m/s per bpm",
-                margin=dict(l=10, r=10, t=50, b=10),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            )
-            st.plotly_chart(fig_eff, use_container_width=True)
-
-        with t2c:
-            fig_pace = go.Figure()
-            fig_pace.add_trace(go.Scatter(x=trend_df["start_dt_local"], y=trend_df["pace_min_per_km"], mode="markers", name="Pace"))
-            fig_pace.add_trace(go.Scatter(x=trend_df["start_dt_local"], y=trend_df["pace_roll"], mode="lines", name="Rolling median (5 runs)"))
-            fig_pace.update_layout(
-                height=320,
-                title="Pace trend at comparable effort",
-                xaxis_title="Date",
-                yaxis_title="min/km",
-                margin=dict(l=10, r=10, t=50, b=10),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            )
-            fig_pace.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig_pace, use_container_width=True)
+        fig_pace = go.Figure()
+        fig_pace.add_trace(go.Scatter(x=trend_df["start_dt_local"], y=trend_df["pace_disp"],
+                                      mode="markers", name="Pace",
+                                      marker=dict(size=6, opacity=0.6)))
+        fig_pace.add_trace(go.Scatter(x=trend_df["start_dt_local"], y=trend_df["pace_roll_disp"],
+                                      mode="lines", name="Rolling median (5 runs)",
+                                      line=dict(width=2.5)))
+        fig_pace.update_layout(
+            height=340,
+            title="Pace trend at comparable effort",
+            xaxis_title="Date",
+            yaxis_title=_pace_lbl,
+            margin=dict(l=10, r=10, t=50, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        )
+        fig_pace.update_yaxes(autorange="reversed")
+        # Trend direction annotation
+        if len(trend_df) >= 5:
+            _roll = trend_df["pace_roll_disp"].dropna()
+            if len(_roll) >= 2:
+                _pace_delta = float(_roll.iloc[-1] - _roll.iloc[0])   # positive = slower
+                _delta_sec = abs(_pace_delta) * 60
+                _trend_unit = "min/mi" if use_miles else "min/km"
+                if abs(_pace_delta) < 0.05:
+                    fig_pace.add_annotation(
+                        text="→ Pace stable over the period", xref="paper", yref="paper",
+                        x=0.01, y=0.04, showarrow=False,
+                        font=dict(size=11, color="rgba(200,200,200,0.7)"),
+                    )
+                elif _pace_delta < 0:
+                    fig_pace.add_annotation(
+                        text=f"↗ {_delta_sec:.0f}s/{_trend_unit} faster over the period",
+                        xref="paper", yref="paper", x=0.01, y=0.04, showarrow=False,
+                        font=dict(size=11, color="rgba(61,186,110,0.9)"),
+                    )
+                else:
+                    fig_pace.add_annotation(
+                        text=f"↘ {_delta_sec:.0f}s/{_trend_unit} slower over the period",
+                        xref="paper", yref="paper", x=0.01, y=0.04, showarrow=False,
+                        font=dict(size=11, color="rgba(253,141,60,0.9)"),
+                    )
+        st.plotly_chart(fig_pace, use_container_width=True)
 
         st.divider()
 
@@ -2408,17 +2775,20 @@ with tab2:
             cad_c3.metric("% runs ≥ 180 spm", f"{(cadence_df['avg_cadence'] >= 180).mean()*100:.0f}%")
 
             fig_cad = go.Figure()
+            fig_cad.add_hrect(
+                y0=170, y1=180, fillcolor="rgba(61,186,110,0.15)", line_width=0,
+                annotation_text="✓ Optimal range (170–180 spm)",
+                annotation_position="top left",
+                annotation=dict(font_size=10, font_color="rgba(61,186,110,0.85)"),
+            )
             fig_cad.add_trace(go.Scatter(
                 x=cadence_df["date"], y=cadence_df["avg_cadence"],
                 mode="markers+lines", name="Avg cadence",
-                marker=dict(size=6),
+                marker=dict(size=7, color="#6baed6"),
+                line=dict(color="#6baed6", width=2),
             ))
-            fig_cad.add_hline(y=170, line_dash="dash", line_color="orange",
-                              annotation_text="170 spm target", annotation_position="bottom right")
-            fig_cad.add_hline(y=180, line_dash="dash", line_color="green",
-                              annotation_text="180 spm", annotation_position="bottom right")
             fig_cad.update_layout(
-                height=300, title="Cadence trend",
+                height=320, title="Cadence trend",
                 xaxis_title="Date", yaxis_title="Steps per min (both feet)",
                 margin=dict(l=10, r=10, t=50, b=10),
             )
@@ -2455,15 +2825,17 @@ with tab2:
         if "temp_c" in df_range.columns and df_range["temp_c"].notna().sum() >= 5:
             st.subheader("Pace vs temperature")
             _wdf = df_range[pd.notna(df_range["temp_c"]) & pd.notna(df_range["pace_min_per_km"])].copy()
-            _wdf["pace_fmt"] = _wdf["pace_sec_per_km"].apply(
-                lambda s: f"{int(s//60)}:{int(s%60):02d}/km" if pd.notna(s) else ""
+            _wdf["pace_disp"] = _wdf["pace_min_per_km"] * _pace_factor
+            _wdf["pace_fmt"] = _wdf["pace_disp"].apply(
+                lambda v: f"{int(v)}:{int(round((v % 1)*60)):02d}/{_d_unit(use_miles)}" if pd.notna(v) else ""
             )
+            _wdf["distance_disp"] = _wdf["distance_km"] * (KM_TO_MILES if use_miles else 1.0)
             fig_weather = px.scatter(
-                _wdf, x="temp_c", y="pace_min_per_km",
+                _wdf, x="temp_c", y="pace_disp",
                 color="run_type" if "run_type" in _wdf.columns else None,
                 color_discrete_map=RUN_TYPE_COLORS,
-                hover_data={"pace_fmt": True, "distance_km": ":.1f", "temp_c": ":.1f"},
-                labels={"temp_c": "Temperature (°C)", "pace_min_per_km": "Pace (min/km)"},
+                hover_data={"pace_fmt": True, "distance_disp": ":.1f", "temp_c": ":.1f"},
+                labels={"temp_c": "Temperature (°C)", "pace_disp": _pace_lbl},
                 title="Pace vs temperature",
                 trendline="ols",
             )
@@ -2479,7 +2851,7 @@ with tab3:
     st.subheader("Long-run durability")
 
     long_run_min_km = float(long_run_ratio_thresh) * float(race_km)
-    st.caption(f"Analysing runs ≥ {long_run_min_km:.1f} km (your threshold × race distance). Adjust in the sidebar.")
+    st.caption(f"Analysing runs ≥ {_dist_fmt(long_run_min_km, use_miles)} (your threshold × race distance). Adjust in the sidebar.")
 
     fatigue = build_fatigue_table(df_range, streams_by_id, long_run_min_km=long_run_min_km)
 
@@ -2568,20 +2940,24 @@ with tab3:
 
         # ── Pace + HR dual-axis chart ────────────────────────────────
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=run_df["distance_km"], y=run_df["pace_smooth"],
+        _lr_pace_factor = (1.0 / KM_TO_MILES) if use_miles else 1.0
+        _lr_dist_factor = KM_TO_MILES if use_miles else 1.0
+        fig.add_trace(go.Scatter(x=run_df["distance_km"] * _lr_dist_factor,
+                                 y=run_df["pace_smooth"] * _lr_pace_factor,
                                  mode="lines", name="Actual pace (smoothed)"))
         if has_gap:
-            fig.add_trace(go.Scatter(x=run_df["distance_km"], y=run_df["gap_pace"],
+            fig.add_trace(go.Scatter(x=run_df["distance_km"] * _lr_dist_factor,
+                                     y=run_df["gap_pace"] * _lr_pace_factor,
                                      mode="lines", name="Grade-adjusted pace (GAP)",
                                      line=dict(dash="dot", color="#fd8d3c")))
         fig.update_layout(
             height=420, margin=dict(l=10, r=10, t=30, b=10),
-            xaxis_title="Distance (km)", yaxis_title="Pace (min/km)",
+            xaxis_title=f"Distance ({_d_unit(use_miles)})", yaxis_title=f"Pace ({_p_unit(use_miles)})",
         )
         fig.update_yaxes(autorange="reversed")
 
         if np.any(np.isfinite(run_df["hr_smooth"])):
-            fig.add_trace(go.Scatter(x=run_df["distance_km"], y=run_df["hr_smooth"],
+            fig.add_trace(go.Scatter(x=run_df["distance_km"] * _lr_dist_factor, y=run_df["hr_smooth"],
                                      mode="lines", name="HR (smoothed)", yaxis="y2"))
             fig.update_layout(
                 yaxis2=dict(title="Heart rate (bpm)", overlaying="y", side="right", showgrid=False)
@@ -2771,7 +3147,7 @@ with tab4:
             with st.expander("Show low-efficiency run table"):
                 cols = ["start_dt_local","name","distance_km","duration_min","avg_hr","pace_min_per_km","speed_per_hr","eff_q20","eff_delta","compromised"]
                 display = comp_recent[cols].copy()
-                display["pace_min_per_km"] = display["pace_min_per_km"].apply(_format_min_per_km)
+                display["pace_min_per_km"] = display["pace_min_per_km"].apply(lambda x: _format_pace(x, use_miles))
                 st.dataframe(display.sort_values("start_dt_local", ascending=False), use_container_width=True)
 
 # =====================================================================
@@ -2818,11 +3194,15 @@ with tab5:
         )
         exp = {"Balanced (default)": 1.06, "Optimistic": 1.03, "Conservative": 1.09}[effort_preset]
     with colB:
-        min_dist = st.number_input(
-            "Ignore runs shorter than (km)",
-            min_value=1.0, max_value=20.0, value=3.0, step=0.5,
+        _min_dist_default = 3.0 / KM_TO_MILES if use_miles else 3.0
+        _min_dist_max = 20.0 / KM_TO_MILES if use_miles else 20.0
+        min_dist_input = st.number_input(
+            f"Ignore runs shorter than ({_d_unit(use_miles)})",
+            min_value=0.5, max_value=round(_min_dist_max, 1),
+            value=round(_min_dist_default, 1), step=0.5,
             help="Short runs (intervals, warm-ups) are excluded from the prediction to reduce noise.",
         )
+        min_dist = min_dist_input * KM_TO_MILES if use_miles else min_dist_input
 
     # Baseline: best equivalent performance
     baseline_sec, source = predict_race_time_riegel(
@@ -2873,52 +3253,56 @@ with tab5:
 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Predicted finish time", format_hms(pred_sec))
-        k2.metric("Predicted pace", _format_min_per_km(pace_min))
+        k2.metric(f"Predicted pace", _format_pace(pace_min, use_miles))
         k3.metric("Fitness trend adjustment", eff_label)
         k4.metric("Load adjustment", risk_label)
 
         if pred_lo is not None and pred_hi is not None and np.isfinite(pred_lo) and np.isfinite(pred_hi):
-            st.info(f"Range across prediction modes: **{format_hms(pred_lo)} → {format_hms(pred_hi)}**")
+            st.info(
+                f"🎯 Predicted finish: **{format_hms(pred_sec)}** &nbsp;·&nbsp; "
+                f"Confidence range: **{format_hms(pred_lo)} → {format_hms(pred_hi)}** "
+                f"(±{abs(pred_hi - pred_lo)/60:.0f} min). "
+                "Based on Riegel's power-law model — accuracy improves with more race-effort runs."
+            )
 
         if best_actual is not None:
             best_actual_sec = best_actual["pace_min_per_km"] * race_km * 60.0
             diff = pred_sec - best_actual_sec
             sign = "+" if diff >= 0 else "−"
             st.info(
-                f"Your best recorded effort at this distance was **{_format_min_per_km(best_actual['pace_min_per_km'])} /km** "
+                f"Your best recorded effort at this distance was **{_format_pace(best_actual['pace_min_per_km'], use_miles)}** "
                 f"({pd.to_datetime(best_actual['date']).strftime('%b %Y')}) — "
                 f"equivalent to {format_hms(best_actual_sec)}. "
                 f"Prediction is {sign}{abs(diff/60):.0f} min relative to that."
             )
 
         st.divider()
-        st.subheader("What the model used")
-        st.write(
-            f"**Best source run:** {pd.to_datetime(source['start_dt_local']).strftime('%Y-%m-%d')} "
-            f"— {float(source['distance_km']):.1f} km in {format_hms(float(source['duration_min'])*60.0)}"
-        )
+        with st.expander("🔍 Show source runs & model data"):
+            st.write(
+                f"**Best source run:** {pd.to_datetime(source['start_dt_local']).strftime('%Y-%m-%d')} "
+                f"— {float(source['distance_km']):.1f} km in {format_hms(float(source['duration_min'])*60.0)}"
+            )
 
-        # Show the top equivalent performances to be transparent
-        df = model_runs[pd.notna(model_runs["distance_km"]) & pd.notna(model_runs["duration_min"])].copy()
-        df = df[(df["distance_km"] >= float(min_dist)) & (df["duration_min"] > 3)].copy()
-        df["time_sec"] = df["duration_min"] * 60.0
-        df["equiv_target_sec"] = df["time_sec"] * (float(race_km) / df["distance_km"]) ** float(exp)
-        df["equiv_time"] = df["equiv_target_sec"].apply(format_hms)
-        df = df.sort_values("equiv_target_sec").head(12)
+            # Show the top equivalent performances to be transparent
+            df = model_runs[pd.notna(model_runs["distance_km"]) & pd.notna(model_runs["duration_min"])].copy()
+            df = df[(df["distance_km"] >= float(min_dist)) & (df["duration_min"] > 3)].copy()
+            df["time_sec"] = df["duration_min"] * 60.0
+            df["equiv_target_sec"] = df["time_sec"] * (float(race_km) / df["distance_km"]) ** float(exp)
+            df["equiv_time"] = df["equiv_target_sec"].apply(format_hms)
+            df = df.sort_values("equiv_target_sec").head(12)
 
-        fig = px.bar(
-            df,
-            x="equiv_time",
-            y=df["start_dt_local"].dt.strftime("%Y-%m-%d"),
-            orientation="h",
-            title="Top runs by equivalent race performance (lower is better)",
-            labels={"equiv_time": "Equivalent finish time", "y": "Run date"},
-        )
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=60, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+            fig = px.bar(
+                df,
+                x="equiv_time",
+                y=df["start_dt_local"].dt.strftime("%Y-%m-%d"),
+                orientation="h",
+                title="Top runs by equivalent race performance (lower is better)",
+                labels={"equiv_time": "Equivalent finish time", "y": "Run date"},
+            )
+            fig.update_layout(height=420, margin=dict(l=10, r=10, t=60, b=10))
+            st.plotly_chart(fig, use_container_width=True)
 
-        with st.expander("Show prediction table"):
-            show = df[["start_dt_local","name","distance_km","duration_min","equiv_time"]].copy()
+            show = df[["start_dt_local", "name", "distance_km", "duration_min", "equiv_time"]].copy()
             st.dataframe(show.sort_values("equiv_time"), use_container_width=True)
 
         st.divider()
@@ -2930,40 +3314,45 @@ with tab5:
             "Negative split = start conservatively and finish strong."
         )
 
+        # Build splits in km internally, convert display values to miles if needed
         n_km = int(np.ceil(float(race_km)))
         km_marks = list(range(1, n_km + 1))
+        _split_dist_factor = KM_TO_MILES if use_miles else 1.0
+        _split_pace_factor = (1.0 / KM_TO_MILES) if use_miles else 1.0
+        split_marks_disp = [round(k * _split_dist_factor, 2) for k in km_marks]
 
-        even_pace     = pace_min
-        neg_first     = even_pace * 1.025   # 2.5% slower first half
-        neg_second    = even_pace * 0.975   # 2.5% faster second half
+        even_pace     = pace_min  # in min/km always
+        neg_first     = even_pace * 1.025
+        neg_second    = even_pace * 0.975
         prog_paces    = [neg_first if k <= race_km / 2 else neg_second for k in km_marks]
         even_paces    = [even_pace] * n_km
+        even_paces_d  = [p * _split_pace_factor for p in even_paces]
+        prog_paces_d  = [p * _split_pace_factor for p in prog_paces]
 
-        def fmt_p(p):
-            m = int(p); s = int(round((p - m) * 60))
+        def fmt_p(p_disp):
+            m = int(p_disp); s = int(round((p_disp - m) * 60))
             return f"{m}:{s:02d}"
 
         splits_df = pd.DataFrame({
-            "km": km_marks,
-            "Even split": [fmt_p(p) for p in even_paces],
-            "Negative split": [fmt_p(p) for p in prog_paces],
+            _d_unit(use_miles): split_marks_disp,
+            f"Even ({_p_unit(use_miles)})": [fmt_p(p) for p in even_paces_d],
+            f"Negative ({_p_unit(use_miles)})": [fmt_p(p) for p in prog_paces_d],
         })
 
-        # Bar chart of pace per km
         fig_splits = go.Figure()
         fig_splits.add_trace(go.Bar(
-            x=km_marks, y=even_paces, name="Even split",
-            marker_color="rgba(107,174,214,0.7)", text=[fmt_p(p) for p in even_paces],
+            x=split_marks_disp, y=even_paces_d, name="Even split",
+            marker_color="rgba(107,174,214,0.7)", text=[fmt_p(p) for p in even_paces_d],
             textposition="outside",
         ))
         fig_splits.add_trace(go.Bar(
-            x=km_marks, y=prog_paces, name="Negative split",
-            marker_color="rgba(82,232,138,0.7)", text=[fmt_p(p) for p in prog_paces],
+            x=split_marks_disp, y=prog_paces_d, name="Negative split",
+            marker_color="rgba(82,232,138,0.7)", text=[fmt_p(p) for p in prog_paces_d],
             textposition="outside",
         ))
-        fig_splits.update_yaxes(autorange="reversed", title="Pace (min/km)")
+        fig_splits.update_yaxes(autorange="reversed", title=_pace_lbl if "pace_lbl" in dir() else f"Pace ({_p_unit(use_miles)})")
         fig_splits.update_layout(
-            height=360, barmode="group", xaxis_title="km",
+            height=360, barmode="group", xaxis_title=_d_unit(use_miles),
             margin=dict(l=10, r=10, t=20, b=10),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         )
@@ -3002,19 +3391,24 @@ with tab_gear:
         # Warning thresholds
         RETIRE_KM = 800
         WARN_KM = 600
+        _g_factor = KM_TO_MILES if use_miles else 1.0
+        _g_unit = _d_unit(use_miles)
+        RETIRE_D = RETIRE_KM * _g_factor
+        WARN_D = WARN_KM * _g_factor
 
         # KPI cards per shoe
         _gear_cols = st.columns(min(len(gear_df), 4))
         for _gi, (_, _grow) in enumerate(gear_df.iterrows()):
             _km = _grow["total_km"]
+            _d = _km * _g_factor
             if _km >= RETIRE_KM:
                 _delta_str = "Replace now"
                 _delta_color = "inverse"
             elif _km >= WARN_KM:
-                _delta_str = f"{RETIRE_KM - _km:.0f} km left"
+                _delta_str = f"{RETIRE_D - _d:.0f} {_g_unit} left"
                 _delta_color = "inverse"
             else:
-                _delta_str = f"{RETIRE_KM - _km:.0f} km remaining"
+                _delta_str = f"{RETIRE_D - _d:.0f} {_g_unit} remaining"
                 _delta_color = "normal"
             _last_used_str = (
                 _grow["last_used"].strftime("%b %d, %Y")
@@ -3023,7 +3417,7 @@ with tab_gear:
             )
             _gear_cols[_gi % 4].metric(
                 label=_grow["name"],
-                value=f"{_km:,.0f} km",
+                value=f"{_d:,.0f} {_g_unit}",
                 delta=_delta_str,
                 delta_color=_delta_color,
                 help=f"{_grow['runs']} runs · Last used: {_last_used_str}",
@@ -3035,17 +3429,18 @@ with tab_gear:
         gear_df["status"] = gear_df["total_km"].apply(
             lambda x: "Replace now" if x >= RETIRE_KM else ("Getting worn" if x >= WARN_KM else "Good")
         )
+        gear_df["total_disp"] = gear_df["total_km"] * _g_factor
         _color_map_gear = {"Good": "#2ca02c", "Getting worn": "#fd8d3c", "Replace now": "#d62728"}
         fig_gear = px.bar(
-            gear_df, x="name", y="total_km", color="status",
+            gear_df, x="name", y="total_disp", color="status",
             color_discrete_map=_color_map_gear,
-            labels={"name": "Shoe / Gear", "total_km": "Total km"},
-            title="Total mileage per shoe",
+            labels={"name": "Shoe / Gear", "total_disp": f"Total {_g_unit}"},
+            title=f"Total mileage per shoe ({_g_unit})",
         )
-        fig_gear.add_hline(y=WARN_KM, line_dash="dot", line_color="#fd8d3c",
-                           annotation_text="Warn (600 km)", annotation_position="top right")
-        fig_gear.add_hline(y=RETIRE_KM, line_dash="dash", line_color="#d62728",
-                           annotation_text="Retire (800 km)", annotation_position="top right")
+        fig_gear.add_hline(y=WARN_D, line_dash="dot", line_color="#fd8d3c",
+                           annotation_text=f"Warn ({WARN_D:.0f} {_g_unit})", annotation_position="top right")
+        fig_gear.add_hline(y=RETIRE_D, line_dash="dash", line_color="#d62728",
+                           annotation_text=f"Retire ({RETIRE_D:.0f} {_g_unit})", annotation_position="top right")
         fig_gear.update_layout(showlegend=True, xaxis_tickangle=-20)
         st.plotly_chart(fig_gear, use_container_width=True)
 
@@ -3060,20 +3455,21 @@ with tab_gear:
                     d_gear_range["shoe"] = d_gear_range["gear_id"]
                 d_gear_range["month"] = d_gear_range["start_dt_local"].dt.to_period("M").astype(str)
                 monthly_gear = d_gear_range.groupby(["month", "shoe"])["distance_km"].sum().reset_index()
+                monthly_gear["distance_disp"] = monthly_gear["distance_km"] * _g_factor
                 fig_monthly_gear = px.bar(
-                    monthly_gear, x="month", y="distance_km", color="shoe",
-                    labels={"month": "Month", "distance_km": "km", "shoe": "Shoe"},
-                    title="Monthly km per shoe (selected period)",
+                    monthly_gear, x="month", y="distance_disp", color="shoe",
+                    labels={"month": "Month", "distance_disp": _g_unit, "shoe": "Shoe"},
+                    title=f"Monthly {_g_unit} per shoe (selected period)",
                     barmode="stack",
                 )
                 st.plotly_chart(fig_monthly_gear, use_container_width=True)
 
         # Raw table
         with st.expander("Full gear table"):
-            _show_cols = ["name", "total_km", "runs", "first_used", "last_used"]
+            _show_cols = ["name", "total_disp", "runs", "first_used", "last_used"]
             st.dataframe(
                 gear_df[_show_cols].rename(columns={
-                    "name": "Shoe", "total_km": "Total km", "runs": "Runs",
+                    "name": "Shoe", "total_disp": f"Total {_g_unit}", "runs": "Runs",
                     "first_used": "First use", "last_used": "Last use",
                 }),
                 use_container_width=True,

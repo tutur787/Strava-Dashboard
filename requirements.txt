@@ -3,7 +3,6 @@ pandas>=2.0
 numpy>=1.24
 plotly>=5.18
 statsmodels>=0.14
-stravalib>=1.5
 requests>=2.31
 python-dateutil>=2.8
 supabase>=2.3
