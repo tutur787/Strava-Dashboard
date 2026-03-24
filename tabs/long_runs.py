@@ -30,6 +30,17 @@ def render(data: dict, settings: dict) -> None:
 
     st.subheader("Long-run durability")
 
+    # ── Tab insight banner (populated after fatigue table is built) ──
+    def _banner(msg, level="info"):
+        _s = {"success": "rgba(0,200,83,0.10);border-left:4px solid #00c853",
+              "warning": "rgba(255,171,0,0.10);border-left:4px solid #ffab00",
+              "info":    "rgba(0,148,255,0.10);border-left:4px solid #0094ff"}
+        st.markdown(
+            f'<div style="background:{_s.get(level,_s["info"])};color:rgba(255,255,255,0.9);'
+            f'padding:0.5rem 1rem;border-radius:4px;margin-bottom:0.75rem;">{msg}</div>',
+            unsafe_allow_html=True)
+    _banner_slot = st.empty()
+
     long_run_min_km = float(long_run_ratio_thresh) * float(race_km)
     st.caption(f"Analysing runs \u2265 {_dist_fmt(long_run_min_km, use_miles)} (your threshold \u00d7 race distance). Adjust in the sidebar.")
 
@@ -42,6 +53,19 @@ def render(data: dict, settings: dict) -> None:
     med_pf  = np.nanmedian(fatigue["pace_fade_pct"])
     med_hrd = np.nanmedian(fatigue["hr_drift_pct"])
     med_dec = np.nanmedian(fatigue["decoupling"])
+
+    # Fill insight banner now that we have the data
+    if np.isfinite(med_dec):
+        _dec_pct = med_dec * 100
+        if abs(_dec_pct) < 5:
+            with _banner_slot:
+                _banner(f"Median aerobic decoupling across {len(fatigue)} long runs: <strong>{_dec_pct:.1f}%</strong> — well within the 5% threshold. Aerobic base is solid.", "success")
+        elif _dec_pct < 10:
+            with _banner_slot:
+                _banner(f"Median aerobic decoupling: <strong>{_dec_pct:.1f}%</strong> — some aerobic stress on long runs. More easy aerobic volume will bring this down.", "warning")
+        else:
+            with _banner_slot:
+                _banner(f"Median aerobic decoupling: <strong>{_dec_pct:.1f}%</strong> — significant drift. Long runs are currently beyond aerobic capacity; shorten them or add base mileage first.", "warning")
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Long runs analysed", f"{len(fatigue)}")

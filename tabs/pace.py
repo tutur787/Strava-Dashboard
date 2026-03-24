@@ -23,6 +23,30 @@ def render(data: dict, settings: dict) -> None:
 
     st.subheader("Pace, effort & efficiency")
 
+    # ── Tab insight banner ───────────────────────────────────────────
+    def _banner(msg, level="info"):
+        _s = {"success": "rgba(0,200,83,0.10);border-left:4px solid #00c853",
+              "warning": "rgba(255,171,0,0.10);border-left:4px solid #ffab00",
+              "info":    "rgba(0,148,255,0.10);border-left:4px solid #0094ff"}
+        st.markdown(
+            f'<div style="background:{_s.get(level,_s["info"])};color:rgba(255,255,255,0.9);'
+            f'padding:0.5rem 1rem;border-radius:4px;margin-bottom:0.75rem;">{msg}</div>',
+            unsafe_allow_html=True)
+    _eff_df = df_range.dropna(subset=["avg_hr", "avg_speed_mps"]).copy()
+    _eff_df = _eff_df[(_eff_df["avg_hr"] > 0) & (_eff_df["avg_speed_mps"] > 0)].sort_values("start_dt_local")
+    if len(_eff_df) >= 10:
+        _mid = len(_eff_df) // 2
+        _eff1 = (_eff_df.iloc[:_mid]["avg_speed_mps"] / _eff_df.iloc[:_mid]["avg_hr"]).mean()
+        _eff2 = (_eff_df.iloc[_mid:]["avg_speed_mps"] / _eff_df.iloc[_mid:]["avg_hr"]).mean()
+        if _eff1 > 0:
+            _pct = (_eff2 - _eff1) / _eff1 * 100
+            if _pct > 3:
+                _banner(f"Speed/HR efficiency has improved <strong>{_pct:.1f}%</strong> over the selected period — aerobic fitness is developing.", "success")
+            elif _pct < -3:
+                _banner(f"Speed/HR efficiency has declined <strong>{abs(_pct):.1f}%</strong> — heat, accumulated fatigue, or reduced volume may be a factor.", "warning")
+            else:
+                _banner("Speed/HR efficiency is stable across the selected period.")
+
     d2 = df_range.copy()
     d2["hr_intensity"] = d2["avg_hr"] / float(max_hr)
     d2 = d2[pd.notna(d2["avg_hr"]) & pd.notna(d2["pace_min_per_km"])]

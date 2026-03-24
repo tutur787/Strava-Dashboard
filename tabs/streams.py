@@ -88,6 +88,10 @@ def render(data: dict, settings: dict) -> None:
     if smooth_window > 1:
         plot_df[metric] = plot_df[metric].rolling(smooth_window, min_periods=1).mean()
 
+    # For pace, strip pre-run standing noise (values > 15 min/km = not yet running)
+    if metric == "pace_min_per_km":
+        plot_df = plot_df[plot_df[metric] < 15.0]
+
     plot_df = plot_df.dropna(subset=[x_axis, metric])
 
     _act_row = df_streamable[df_streamable["id"].astype(int) == activity_id].iloc[0]

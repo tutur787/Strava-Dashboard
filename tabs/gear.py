@@ -19,6 +19,15 @@ def render(data: dict, settings: dict) -> None:
 
     st.header("Gear & Shoe Tracker")
 
+    def _banner(msg, level="info"):
+        _s = {"success": "rgba(0,200,83,0.10);border-left:4px solid #00c853",
+              "warning": "rgba(255,171,0,0.10);border-left:4px solid #ffab00",
+              "info":    "rgba(0,148,255,0.10);border-left:4px solid #0094ff"}
+        st.markdown(
+            f'<div style="background:{_s.get(level,_s["info"])};color:rgba(255,255,255,0.9);'
+            f'padding:0.5rem 1rem;border-radius:4px;margin-bottom:0.75rem;">{msg}</div>',
+            unsafe_allow_html=True)
+
     gear_names_map = gear_details if gear_details else {}
     gear_df = compute_gear_stats(activities, gear_names_map)
 
@@ -33,6 +42,20 @@ def render(data: dict, settings: dict) -> None:
     _g_unit = _d_unit(use_miles)
     RETIRE_D = RETIRE_KM * _g_factor
     WARN_D = WARN_KM * _g_factor
+
+    # Insight banner — flag any shoe needing attention
+    _retire_shoes = gear_df[gear_df["total_km"] >= RETIRE_KM]
+    _warn_shoes   = gear_df[(gear_df["total_km"] >= WARN_KM) & (gear_df["total_km"] < RETIRE_KM)]
+    if len(_retire_shoes) > 0:
+        _names = ", ".join(_retire_shoes["name"].tolist())
+        _banner(f"<strong>{_names}</strong> {'has' if len(_retire_shoes)==1 else 'have'} reached or exceeded {RETIRE_D:.0f} {_g_unit} — consider retiring {'it' if len(_retire_shoes)==1 else 'them'} to reduce injury risk.", "warning")
+    elif len(_warn_shoes) > 0:
+        _names = ", ".join(_warn_shoes["name"].tolist())
+        _banner(f"<strong>{_names}</strong> {'is' if len(_warn_shoes)==1 else 'are'} approaching the {RETIRE_D:.0f} {_g_unit} retirement threshold — start planning a replacement.", "info")
+    else:
+        _freshest = gear_df.sort_values("total_km").iloc[0]
+        _rem = (RETIRE_D - _freshest["total_km"] * _g_factor)
+        _banner(f"All shoes are within safe mileage limits. Your freshest pair has <strong>{_rem:.0f} {_g_unit}</strong> remaining before the retirement threshold.")
 
     # KPI cards per shoe
     _gear_cols = st.columns(min(len(gear_df), 4))

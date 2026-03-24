@@ -24,6 +24,15 @@ def render(data: dict, settings: dict) -> None:
 
     st.subheader("Readiness, recovery & injury-risk proxies")
 
+    def _banner(msg, level="info"):
+        _s = {"success": "rgba(0,200,83,0.10);border-left:4px solid #00c853",
+              "warning": "rgba(255,171,0,0.10);border-left:4px solid #ffab00",
+              "info":    "rgba(0,148,255,0.10);border-left:4px solid #0094ff"}
+        st.markdown(
+            f'<div style="background:{_s.get(level,_s["info"])};color:rgba(255,255,255,0.9);'
+            f'padding:0.5rem 1rem;border-radius:4px;margin-bottom:0.75rem;">{msg}</div>',
+            unsafe_allow_html=True)
+
     daily, weekly = daily_all.copy(), weekly_all.copy()
     if len(daily) == 0 or len(weekly) == 0:
         st.info("Not enough data in the selected range to compute readiness.")
@@ -48,6 +57,15 @@ def render(data: dict, settings: dict) -> None:
         readiness = ("Moderate risk", "\U0001f7e0")
     else:
         readiness = ("High risk", "\U0001f534")
+
+    # Insight banner
+    if risk_score < 25:
+        _banner(f"Current risk score <strong>{risk_score:.0f}/100</strong> — you look fresh. Good window to add quality training or race.", "success")
+    elif risk_score < 55:
+        _acwr_str = f"ACWR {acwr_val:.2f}" if pd.notna(acwr_val) else "moderate load"
+        _banner(f"Moderate risk score <strong>{risk_score:.0f}/100</strong> ({_acwr_str}) — training is productive but watch for early fatigue signs.", "info")
+    else:
+        _banner(f"High risk score <strong>{risk_score:.0f}/100</strong> — elevated overreach risk. Prioritise recovery: easy runs, sleep, and at least 1–2 rest days.", "warning")
 
     # KPI row
     c1, c2, c3, c4 = st.columns(4)

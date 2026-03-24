@@ -21,6 +21,7 @@ def render(data: dict, settings: dict) -> None:
     use_miles = settings["use_miles"]
     consistency = data["consistency"]
     vo2max_est = data["vo2max_est"]
+    vo2max_source = data.get("vo2max_source")
     df_range = data["df_range"]
     activities = data["activities"]
     streams_by_id = data["streams_by_id"]
@@ -35,8 +36,9 @@ def render(data: dict, settings: dict) -> None:
     o4.metric("Consistent weeks (last 12)", f"{consistency['pct_consistent_weeks']:.0f}%",
               help="Weeks with \u22653 runs in the last 12 weeks.")
     if vo2max_est is not None:
+        _src_label = vo2max_source or "best recorded effort"
         o5.metric("Estimated VO\u2082max", f"{vo2max_est:.1f} ml/kg/min",
-                  help="VDOT estimate via Jack Daniels' formula from your best recorded effort. Not a lab test.")
+                  help=f"VDOT estimate via Jack Daniels' formula from your {_src_label}. Not a lab test.")
     else:
         o5.metric("Estimated VO\u2082max", "\u2014", "Need a 5K\u2013marathon effort")
 
@@ -205,8 +207,9 @@ def render(data: dict, settings: dict) -> None:
                 unsafe_allow_html=True,
             )
         with v_col2:
+            _src_label = vo2max_source or "best recorded effort"
             st.caption(
-                "VDOT is derived from your best recorded effort using Jack Daniels' formula. "
+                f"VDOT is derived from your **{_src_label}** using Jack Daniels' formula. "
                 "It reflects race-pace fitness \u2014 not a lab VO\u2082max. A 1-point increase typically means "
                 "~1\u20132% faster race times. Improve it by adding easy aerobic volume and one quality session per week."
             )
@@ -220,8 +223,10 @@ def render(data: dict, settings: dict) -> None:
 
     # Jack Daniels training paces derived from VDOT
     st.subheader("Jack Daniels training paces")
+    _src_label = vo2max_source or "best recorded effort"
     st.caption(
-        f"Prescribed training paces calculated from your VDOT of **{vo2max_est:.1f}**. "
+        f"Prescribed training paces calculated from your VDOT of **{vo2max_est:.1f}** "
+        f"(derived from your {_src_label}). "
         "Each zone targets a specific physiological adaptation. "
         "Source: *Daniels' Running Formula* (2005)."
     )

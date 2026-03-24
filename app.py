@@ -207,29 +207,55 @@ _hr_zones        = settings["_hr_zones"]
 # ── Landing page (unauthenticated) ────────────────────────────────────
 if "strava_tokens" not in st.session_state:
     if _OAUTH_ENABLED:
-        col_land, _ = st.columns([2, 1])
-        with col_land:
-            st.markdown("### Connect your Strava account to get started")
-            st.markdown(
-                "Allure analyses your complete running history — training load, "
-                "pace trends, HR zones, race predictions, recovery risk and more. "
-                "Your data is only used to power your personal dashboard."
-            )
-            _auth_url = get_strava_auth_url(_STRAVA_CLIENT_ID, _REDIRECT_URI)
-            st.markdown(
-                f"""<a href="{_auth_url}" target="_self" style="
-                    display:inline-block;
-                    background-color:#FC4C02;
-                    color:#ffffff;
-                    text-decoration:none;
-                    font-weight:600;
-                    font-size:1rem;
-                    padding:0.55rem 1.4rem;
-                    border-radius:6px;
-                    margin-top:0.5rem;
-                ">🔗 Connect with Strava</a>""",
+        _auth_url = get_strava_auth_url(_STRAVA_CLIENT_ID, _REDIRECT_URI)
+        st.markdown(
+            """
+            <p style="font-size:1.05rem;color:rgba(255,255,255,0.75);margin-top:0;margin-bottom:1.8rem;">
+            A personal running analytics dashboard powered by your Strava data.
+            </p>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        _f1, _f2, _f3, _f4 = st.columns(4)
+        _feature_style = (
+            "background:rgba(255,255,255,0.05);border-radius:8px;"
+            "padding:1rem 1.1rem;height:100%;"
+        )
+        for _col, _icon, _title, _desc in [
+            (_f1, "📈", "Training Load", "CTL, ATL & TSB — see if you're building fitness or heading for burnout."),
+            (_f2, "⚡", "Pace & Efficiency", "Speed/HR trends, grade-adjusted pace and aerobic efficiency over time."),
+            (_f3, "🏁", "Race Prediction", "VDOT-based race time estimates and Jack Daniels training pace zones."),
+            (_f4, "🛡️", "Recovery & Risk", "ACWR-based overreach risk, compromised runs and readiness score."),
+        ]:
+            _col.markdown(
+                f'<div style="{_feature_style}">'
+                f'<div style="font-size:1.6rem;margin-bottom:0.4rem">{_icon}</div>'
+                f'<strong style="font-size:0.95rem">{_title}</strong>'
+                f'<p style="font-size:0.8rem;color:rgba(255,255,255,0.6);margin:0.3rem 0 0">{_desc}</p>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
+
+        st.markdown("<div style='margin-top:1.8rem'></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"""<a href="{_auth_url}" target="_self" style="
+                display:inline-block;
+                background-color:#FC4C02;
+                color:#ffffff;
+                text-decoration:none;
+                font-weight:600;
+                font-size:1rem;
+                padding:0.6rem 1.6rem;
+                border-radius:6px;
+            ">🔗 Connect with Strava</a>""",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<p style='margin-top:1.5rem;font-size:0.82rem;color:rgba(255,255,255,0.4);'>"
+            "← Set your max HR, HR zones and target race in the sidebar before connecting</p>",
+            unsafe_allow_html=True,
+        )
     else:
         st.info(
             "Strava credentials are not configured. "
@@ -288,7 +314,7 @@ if _SUPABASE_ENABLED and _athlete_id:
 # 2. Try disk cache
 if activities is None or len(activities) == 0:
     try:
-        _disk = load_strava_disk_cache()
+        _disk = load_strava_disk_cache(athlete_id=int(_athlete_id) if _athlete_id else None)
         if _disk and "activities" in _disk and _disk["activities"]:
             activities = parse_activities_raw(_disk["activities"])
     except Exception:
@@ -308,7 +334,7 @@ if (activities is None or len(activities) == 0) and _access_token:
                 pass
         # Persist to disk cache (streams come later)
         try:
-            save_strava_disk_cache(_raw_acts, {})
+            save_strava_disk_cache(_raw_acts, {}, athlete_id=int(_athlete_id) if _athlete_id else None)
         except Exception:
             pass
         st.session_state["strava_fetched_at"] = datetime.utcnow().isoformat()
@@ -353,8 +379,8 @@ if not _stream_refresh_needed and _SUPABASE_ENABLED and _athlete_id:
     except Exception:
         pass
 
-# 2. Disk fallback (skipped on forced refresh to avoid stale cache)
-if not _stream_refresh_needed and not streams_by_id:
+# 2. Disk fallback — legacy local file, only used when Supabase is disabled
+if not _stream_refresh_needed and not streams_by_id and not _SUPABASE_ENABLED:
     try:
         _disk_streams = load_streams(STREAMS_PATH)
         if _disk_streams:
@@ -491,6 +517,9 @@ if len(activities) > 0 and "start_dt_local" in activities.columns:
 # ── Shared analytics pre-computation ─────────────────────────────────
 bests       = compute_personal_bests(activities) if len(activities) > 0 else {}
 vo2max_est  = estimate_vo2max(bests)
+_vo2max_priority = [("best_marathon", "marathon PB"), ("best_hm", "half-marathon PB"),
+                    ("best_10k", "10K PB"), ("best_5k", "5K PB")]
+vo2max_source = next((lbl for key, lbl in _vo2max_priority if key in bests), None)
 consistency = compute_consistency(activities) if len(activities) > 0 else {}
 
 cadence_df = pd.DataFrame()
@@ -571,12 +600,52 @@ data: dict = {
     "weekly_all":    weekly_all,
     "bests":         bests,
     "vo2max_est":    vo2max_est,
+    "vo2max_source": vo2max_source,
     "consistency":   consistency,
     "cadence_df":    cadence_df,
     "_weather_df":   _weather_df,
     "_hr_zones":     _hr_zones,
     "gear_details":  gear_details,
 }
+
+# ── Tab memory — persist active tab across reruns via localStorage ────
+import streamlit.components.v1 as _stc
+_stc.html("""
+<script>
+(function() {
+    var KEY = 'allure_active_tab';
+    function getButtons() {
+        return window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+    }
+    function saveTab(idx) {
+        try { localStorage.setItem(KEY, String(idx)); } catch(e) {}
+    }
+    function attachListeners(buttons) {
+        buttons.forEach(function(btn, idx) {
+            if (!btn.dataset.allureTab) {
+                btn.dataset.allureTab = idx;
+                btn.addEventListener('click', function() { saveTab(idx); });
+            }
+        });
+    }
+    function restoreTab(attempts) {
+        var buttons = getButtons();
+        if (!buttons || buttons.length === 0) {
+            if (attempts < 20) setTimeout(function() { restoreTab(attempts + 1); }, 80);
+            return;
+        }
+        attachListeners(buttons);
+        var saved = parseInt(localStorage.getItem(KEY) || '0');
+        if (isNaN(saved) || saved >= buttons.length) saved = 0;
+        var active = Array.from(buttons).findIndex(function(b) {
+            return b.getAttribute('aria-selected') === 'true';
+        });
+        if (active !== saved) { buttons[saved].click(); }
+    }
+    restoreTab(0);
+})();
+</script>
+""", height=0)
 
 # ── Tab layout ────────────────────────────────────────────────────────
 _tab_labels = [

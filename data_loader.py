@@ -142,26 +142,36 @@ def streams_to_df(streams_obj: dict) -> pd.DataFrame:
 
 
 # ── Disk cache helpers ────────────────────────────────────────────────
-def load_strava_disk_cache() -> Optional[Dict]:
+def _disk_cache_path(athlete_id: Optional[int] = None) -> str:
+    """Return a per-athlete cache path, falling back to the legacy path."""
+    if athlete_id:
+        return f"data/strava_cache_{athlete_id}.json"
+    return STRAVA_CACHE_PATH
+
+
+def load_strava_disk_cache(athlete_id: Optional[int] = None) -> Optional[Dict]:
     """Load cached activities + streams from disk. Returns None if missing."""
-    if not os.path.exists(STRAVA_CACHE_PATH):
+    path = _disk_cache_path(athlete_id)
+    if not os.path.exists(path):
         return None
     try:
-        with open(STRAVA_CACHE_PATH, "r") as f:
+        with open(path, "r") as f:
             return json.load(f)
     except Exception:
         return None
 
 
-def save_strava_disk_cache(activities_raw: list, streams_dict: Dict) -> None:
+def save_strava_disk_cache(activities_raw: list, streams_dict: Dict,
+                            athlete_id: Optional[int] = None) -> None:
     """Persist activities and streams to disk so they survive session reloads."""
-    os.makedirs(os.path.dirname(STRAVA_CACHE_PATH), exist_ok=True)
+    path = _disk_cache_path(athlete_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {
         "fetched_at": datetime.utcnow().isoformat(),
         "activities": activities_raw,
         "streams": {str(k): v for k, v in streams_dict.items()},
     }
-    with open(STRAVA_CACHE_PATH, "w") as f:
+    with open(path, "w") as f:
         json.dump(payload, f)
 
 

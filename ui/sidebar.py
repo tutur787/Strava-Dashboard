@@ -49,6 +49,7 @@ def render_sidebar(
             step=1,
             help="Used to compute intensity = avgHR / maxHR.",
         )
+        st.caption("Not sure? A common starting estimate is **220 − your age**. Measure properly with a max-effort test for best accuracy.")
 
         rest_hr = st.number_input(
             "Resting HR (bpm)",
@@ -68,18 +69,31 @@ def render_sidebar(
 
         with st.expander("HR Zone Boundaries (% of max HR)"):
             st.caption("Drag to adjust where each zone begins and ends. These boundaries drive both run classification and the zone breakdown chart.")
-            hr_z1 = st.slider("Z1/Z2 boundary", 50, 75, int(_prefs.get("hr_z1", 60)), step=1,
-                              help="Below this = Z1 Recovery") / 100.0
-            hr_z2 = st.slider("Z2/Z3 boundary (Easy threshold)", 65, 88, int(_prefs.get("hr_z2", 80)), step=1,
-                              help="Runs with median HR below this are classified as Easy") / 100.0
-            hr_z3 = st.slider("Z3/Z4 boundary (Tempo threshold)", 78, 95, int(_prefs.get("hr_z3", 87)), step=1,
-                              help="Runs with median HR above this are classified as Tempo") / 100.0
-            hr_z4 = st.slider("Z4/Z5 boundary", 85, 100, int(_prefs.get("hr_z4", 93)), step=1,
-                              help="Above this = Z5 VO\u2082max") / 100.0
+            _hz1_pct = st.slider("Z1/Z2 boundary", 50, 75, int(_prefs.get("hr_z1", 60)), step=1,
+                                 help="Below this = Z1 Recovery")
+            _hz2_pct = st.slider("Z2/Z3 boundary (Easy threshold)", 65, 88, int(_prefs.get("hr_z2", 80)), step=1,
+                                 help="Runs with median HR below this are classified as Easy")
+            _hz3_pct = st.slider("Z3/Z4 boundary (Tempo threshold)", 78, 95, int(_prefs.get("hr_z3", 87)), step=1,
+                                 help="Runs with median HR above this are classified as Tempo")
+            _hz4_pct = st.slider("Z4/Z5 boundary", 85, 100, int(_prefs.get("hr_z4", 93)), step=1,
+                                 help="Above this = Z5 VO\u2082max")
+            hr_z1 = _hz1_pct / 100.0
+            hr_z2 = _hz2_pct / 100.0
+            hr_z3 = _hz3_pct / 100.0
+            hr_z4 = _hz4_pct / 100.0
             # Clamp to prevent inversions
             hr_z1 = min(hr_z1, hr_z2 - 0.01)
             hr_z3 = max(hr_z3, hr_z2 + 0.01)
             hr_z4 = max(hr_z4, hr_z3 + 0.01)
+            # Show actual BPM equivalents
+            _b1 = int(hr_z1 * max_hr)
+            _b2 = int(hr_z2 * max_hr)
+            _b3 = int(hr_z3 * max_hr)
+            _b4 = int(hr_z4 * max_hr)
+            st.caption(
+                f"**Z1** < {_b1} bpm  ·  **Z2** {_b1}–{_b2} bpm  ·  "
+                f"**Z3** {_b2}–{_b3} bpm  ·  **Z4** {_b3}–{_b4} bpm  ·  **Z5** > {_b4} bpm"
+            )
             _hr_zones = make_hr_zones(hr_z1, hr_z2, hr_z3, hr_z4)
 
         _race_keys = list(RACE_PRESETS_KM.keys())
@@ -102,6 +116,7 @@ def render_sidebar(
             step=0.01,
             help="Used in Tab 2 to track efficiency at race-relevant intensity.",
         )
+        st.caption(f"**{int(effort_band[0] * max_hr)}–{int(effort_band[1] * max_hr)} bpm** at your current max HR of {max_hr} bpm")
 
         lr_def = float(LONG_RUN_DEFAULTS.get(race_choice, 0.60))
         st.subheader("Long-run threshold")
@@ -113,6 +128,8 @@ def render_sidebar(
             step=0.05,
             help="Tab 3 considers runs longer than this threshold as 'long runs' for fatigue modeling.",
         )
+        _lr_min_km = long_run_ratio_thresh * race_km
+        st.caption(f"= **{_lr_min_km:.1f} km** / **{_lr_min_km * KM_TO_MILES:.1f} mi** minimum long run")
 
         st.subheader("Readiness windows")
         readiness_window_days = st.slider(
@@ -223,8 +240,10 @@ def render_sidebar(
                 _refresh_athlete_id = st.session_state.get("strava_athlete_id")
                 for _k in ["strava_activities", "strava_streams", "gear_details", "strava_fetched_at"]:
                     st.session_state.pop(_k, None)
-                if os.path.exists(STRAVA_CACHE_PATH):
-                    os.remove(STRAVA_CACHE_PATH)
+                _cache_path = (f"data/strava_cache_{_refresh_athlete_id}.json"
+                               if _refresh_athlete_id else STRAVA_CACHE_PATH)
+                if os.path.exists(_cache_path):
+                    os.remove(_cache_path)
                 # Clear Supabase activities so they re-fetch from API
                 if _SUPABASE_ENABLED and _refresh_athlete_id:
                     try:

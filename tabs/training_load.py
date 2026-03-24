@@ -29,6 +29,29 @@ def render(data: dict, settings: dict) -> None:
 
     daily, weekly = daily_all, weekly_all
 
+    # ── Tab insight banner ───────────────────────────────────────────
+    def _banner(msg, level="info"):
+        _s = {"success": "rgba(0,200,83,0.10);border-left:4px solid #00c853",
+              "warning": "rgba(255,171,0,0.10);border-left:4px solid #ffab00",
+              "info":    "rgba(0,148,255,0.10);border-left:4px solid #0094ff"}
+        st.markdown(
+            f'<div style="background:{_s.get(level,_s["info"])};color:rgba(255,255,255,0.9);'
+            f'padding:0.5rem 1rem;border-radius:4px;margin-bottom:0.75rem;">{msg}</div>',
+            unsafe_allow_html=True)
+    if len(daily) >= 14:
+        _d_sorted = daily.sort_values("date_ts")
+        _ctl_now = float(_d_sorted.iloc[-1].get("chronic_load", 0) or 0)
+        _idx_4w  = max(0, len(_d_sorted) - 29)
+        _ctl_4w  = float(_d_sorted.iloc[_idx_4w].get("chronic_load", 0) or 0)
+        if _ctl_4w > 1:
+            _chg = (_ctl_now - _ctl_4w) / _ctl_4w * 100
+            if _chg > 5:
+                _banner(f"Aerobic fitness (CTL) has grown <strong>{abs(_chg):.0f}%</strong> over the last 4 weeks — base is building well.", "success")
+            elif _chg < -5:
+                _banner(f"Aerobic fitness (CTL) has declined <strong>{abs(_chg):.0f}%</strong> over the last 4 weeks — consider increasing volume.", "warning")
+            else:
+                _banner("Aerobic fitness (CTL) is holding steady over the last 4 weeks.")
+
     if len(daily) == 0 or len(weekly) == 0:
         st.info("Not enough data in the selected range to compute training load.")
         st.markdown(

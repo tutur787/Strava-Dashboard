@@ -408,6 +408,16 @@ def build_within_run_df(streams: Dict[str, Any]) -> Optional[pd.DataFrame]:
     v = v[:n]
     hr = hr[:n] if hr is not None else np.full(n, np.nan)
 
+    # Trim pre-run standing period (GPS noise / watch-start before first stride)
+    # Find the first index where velocity clearly indicates running (> 1 m/s ≈ 16 min/km)
+    _first_move = int(np.argmax(v > 1.0)) if np.any(v > 1.0) else 0
+    if _first_move > 0:
+        t = t[_first_move:]
+        d = d[_first_move:]
+        v = v[_first_move:]
+        hr = hr[_first_move:]
+        d = d - d[0]  # reset distance to 0 from start of actual running
+
     v = np.where(v > 0, v, np.nan)
     pace_min_km = (1000.0 / v) / 60.0
 
