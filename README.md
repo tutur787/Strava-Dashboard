@@ -1,184 +1,226 @@
-# Endurance Analytics Dashboard
+# Allure.run
 
-This project is a dashboard that allows you to analyze your endurance activities and predict your performance in races.
+A personal running analytics dashboard that connects to your Strava account and turns your training history into actionable insight. Built with Streamlit, powered by Supabase, visualised with Plotly.
 
-It is built with Streamlit and uses the Stravalib library to interact with the Strava API.
+---
 
-## Installation
+## What it does
 
-1. Clone the repository
-2. Install the dependencies `pip install -r requirements.txt`
-3. Read the `Initialization of data` section to get started
-4. Run the dashboard with `streamlit run app.py`
-5. Open the browser and go to http://localhost:8501
+Allure analyses your complete running history across nine tabs:
 
-## Initialization of data
 
-This project pulls activity data from the Strava API and stores it locally as JSON files.  
-Before fetching activities, you must authenticate with Strava and obtain a valid access token.
+| Tab                   | What it answers                                                               |
+| --------------------- | ----------------------------------------------------------------------------- |
+| **Overview**          | How fit am I right now? Personal bests, VO₂max estimate, consistency streaks  |
+| **Training Load**     | Am I building or burning out? CTL, ATL, TSB, ACWR, HR zone breakdown          |
+| **Pace & Efficiency** | Is my running economy improving? Speed/HR trend, GAP, pace distribution       |
+| **Long Runs**         | How durable is my aerobic base? Aerobic decoupling, pace fade, HR drift       |
+| **Recovery & Risk**   | Should I train hard today? Composite risk score, compromised run detection    |
+| **Race Predictor**    | What can I race right now? Riegel-based prediction from best recent efforts   |
+| **Gear**              | When do my shoes need replacing? Mileage tracking with retirement warnings    |
+| **Guide**             | How does any of this work? Formula explanations with sources                  |
+| **Raw Streams**       | What happened second-by-second on a specific run? Per-sample GPS, HR, cadence |
 
-### Step 1: Create a Strava API application
-1. Go to https://www.strava.com/settings/api
-2. Create an application and note:
-   - `CLIENT_ID`
-   - `CLIENT_SECRET`
 
-### Step 2: Authenticate and obtain tokens
-Run the main script and choose **option 0 (authenticate)**.
+Every number on the dashboard is explained, sourced, and based on established exercise science — no black-box models.
 
-You will be prompted for:
-- `CLIENT_ID`
-- `CLIENT_SECRET`
+---
 
-The script will:
-1. Print an authorization URL
-2. Open the URL in your browser and authorize the app
-3. Redirect you to a URL containing a `code`
-4. Prompt you to paste that `code` back into the terminal
+## Key formulas
 
-You will receive:
-- `ACCESS_TOKEN`
-- `REFRESH_TOKEN`
+**Training load** — Full Banister TRIMP with heart-rate reserve:
 
-Save both securely. The access token is required for data fetching.
+```
+HRr = (avg_hr − rest_hr) / (max_hr − rest_hr)
+TRIMP = duration × HRr × 0.64 × e^(1.92 × HRr)   # Men
+TRIMP = duration × HRr × 0.86 × e^(1.67 × HRr)   # Women
+```
 
-### Step 3: Refresh an expired access token
-Strava access tokens expire after 6 hours.  
-To refresh a token, run the script and choose **option 1 (refresh token)**.
+*Source: Banister et al. (1975), Morton et al. (1990)*
 
-You will be prompted for:
-- `CLIENT_ID`
-- `CLIENT_SECRET`
-- `REFRESH_TOKEN`
+**Performance Management Chart** — Exponentially weighted moving averages of daily TRIMP:
 
-The script will return:
-- a new `ACCESS_TOKEN`
-- a new `REFRESH_TOKEN`
+- CTL (Fitness) = 28-day EWMA
+- ATL (Fatigue) = 7-day EWMA
+- TSB (Form) = CTL − ATL
+- ACWR = ATL / CTL
 
-### Step 4: Initialize local data files
-To fetch activity data and initialize local storage, run the script and choose **option 2 (fetch new activities)**.
+**VO₂max / VDOT** — Jack Daniels' formula from best recorded effort:
 
-On the first run:
-- You will be prompted for an `ACCESS_TOKEN`
-- You will be prompted for a start date (`YYYY-MM-DD`)
-- All activities after that date will be downloaded
+```
+VO₂ = −4.60 + 0.182258v + 0.000104v²
+%VO₂max = 0.8 + 0.1894393·e^(−0.012778t) + 0.2989558·e^(−0.1932605t)
+VDOT = VO₂ / %VO₂max
+```
 
-The following files will be created automatically if they do not exist:
-- `data/athlete.json` — athlete profile metadata
-- `data/strava_runs_detailed.json` — detailed activity objects
-- `data/strava_runs_streams.json` — high-resolution activity streams
+*Source: Daniels' Running Formula (2005)*
 
-On subsequent runs:
-- Only activities newer than the most recent stored activity are fetched
-- Existing activities and streams are not duplicated
+**Grade Adjusted Pace** — Minetti metabolic cost model:
 
-## How it works
+```
+C(g) = 280.5g⁵ − 58.7g⁴ − 76.8g³ + 51.9g² + 19.6g + 2.5
+GAP = actual_pace × (C(0) / C(g))
+```
 
-This dashboard is an interactive endurance training analytics platform built with Streamlit, using Strava activity and stream data to analyze training load, performance, fatigue, readiness, and race outcomes in a transparent, explainable way.
+*Source: Minetti et al. (2002), J Applied Physiology*
 
-The app is designed to be:
-- Reusable across athletes and race distances (5K → Marathon)
-- HR-based (no power meter required)
-- Explainable (rule-based and analytical, not a black-box model)
-- Portfolio-ready, showcasing data engineering, time-series analysis, and sports analytics concepts
+**Race prediction** — Riegel power law, median of top-5 qualifying efforts:
 
-All computations are derived from standard Strava fields such as distance, time, heart rate, speed, and per-second streams.
+```
+T₂ = T₁ × (D₂ / D₁)^1.06
+```
 
-### Architecture
-- Frontend: Streamlit
-- Data source: Strava activity exports (JSON)
-- `strava_runs_detailed.json` (per-activity summaries)
-- `strava_runs_streams.json` (per-sample streams: HR, pace, distance, etc.)
-- Caching: `@st.cache_data` for efficient recomputation
-- Visualization: Plotly (interactive, zoomable charts)
+*Source: Riegel (1981)*
 
-User-controlled parameters (Max HR, race distance, HR bands, readiness window, etc.) are shared across all tabs to keep analyses consistent.
+**Aerobic decoupling** — Pa:HR metric (Friel):
 
-### Tabs overview
+```
+decoupling = (speed/HR)_first_half / (speed/HR)_second_half − 1
+< 5% = aerobic base held up well
+```
 
-#### Tab 0 — Streams Explorer
+---
 
-An exploratory tool to inspect raw per-sample streams for individual activities.
-- Select an activity by date – name – distance
-- Convert Strava streams into a tidy dataframe
-- Plot any numeric metric (HR, pace, cadence, grade, etc.)
-- Choose time or distance as the x-axis
-- Optional rolling smoothing
-- Pace plots are automatically inverted (lower = faster)
+## Architecture
 
-This tab provides full transparency into the underlying data used by later models.
+```
+app.py                  Orchestrator — auth, data loading, tab routing
+├── ui/sidebar.py       All sidebar widgets, returns settings dict
+├── ui/styles.py        Global CSS injection
+├── analytics.py        All computations (TRIMP, VDOT, risk, GAP, etc.)
+├── data_loader.py      Parse activities, disk cache, weather fetch
+├── database.py         Supabase helpers (load/save athletes, activities, streams)
+├── auth.py             Strava OAuth2 flow, token management
+├── config.py           Constants — race presets, HR zones, file paths
+└── tabs/
+    ├── overview.py
+    ├── training_load.py
+    ├── pace.py
+    ├── long_runs.py
+    ├── recovery.py
+    ├── race_predictor.py
+    ├── gear.py
+    ├── guide.py
+    └── streams.py
+```
 
-#### Tab 1 — Training Load
+**Stack:** Python · Streamlit · Supabase (PostgreSQL) · Plotly · Strava API
 
-Quantifies training volume and intensity over time using HR-based load.
-- Daily and weekly load (duration × HR intensity)
-- Acute (7-day) vs chronic (28-day) load
-- ACWR (Acute:Chronic Workload Ratio)
-- Weekly distance and long-run normalization by race distance
-- Training monotony and strain
+---
 
-This tab answers: “How much am I training, and how fast is it changing?”
+## Setup
 
-#### Tab 2 — Pace & Efficiency
+### 1. Create a Strava API application
 
-Evaluates running efficiency at comparable effort.
-- Pace vs heart rate scatter
-- Pace distribution
-- Efficiency index (speed / HR)
-- Trend analysis within a race-effort HR band
-- HR-normalized pace comparisons
+1. Go to [strava.com/settings/api](https://www.strava.com/settings/api)
+2. Create an application
+3. Set the **Authorisation Callback Domain** to `localhost` for local dev, or your deployed URL for production
+4. Note your `Client ID` and `Client Secret`
 
-This isolates fitness changes from effort changes.
+### 2. Create a Supabase project
 
-#### Tab 3 — Long-Run Fatigue
+1. Create a free project at [supabase.com](https://supabase.com)
+2. Run the following in the **SQL Editor**:
 
-Uses per-sample streams to model within-run fatigue on long runs.
-- Pace fade (second half vs first half)
-- Heart-rate drift
-- HR–pace decoupling
-- Long-run trend tracking over time
-- Interactive inspection of individual long runs
+```sql
+CREATE TABLE athletes (
+    athlete_id  BIGINT PRIMARY KEY,
+    display_name TEXT,
+    refresh_token TEXT,
+    fetched_at  TIMESTAMPTZ DEFAULT NOW(),
+    preferences JSONB DEFAULT '{}'
+);
 
-This tab focuses on endurance durability rather than raw speed.
+CREATE TABLE activities (
+    athlete_id  BIGINT,
+    activity_id BIGINT,
+    data        JSONB,
+    PRIMARY KEY (athlete_id, activity_id)
+);
 
-#### Tab 4 — Readiness & Risk
+CREATE TABLE streams (
+    athlete_id  BIGINT,
+    activity_id BIGINT,
+    data        JSONB,
+    PRIMARY KEY (athlete_id, activity_id)
+);
 
-Provides rule-based readiness and injury-risk proxies using recent training history.
-- Composite daily risk score (0–100)
-- Rest-day tracking
-- ACWR alerts
-- Weekly load spikes and monotony
-- “Compromised run” detection based on efficiency outliers
+CREATE INDEX idx_activities_athlete ON activities(athlete_id);
+CREATE INDEX idx_streams_athlete    ON streams(athlete_id);
 
-These are decision-support indicators, not medical advice.
+-- Row Level Security (blocks direct anon-key access)
+ALTER TABLE athletes  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE activities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE streams    ENABLE ROW LEVEL SECURITY;
+```
 
-#### Tab 5 — Race Prediction
+1. Find your **Project URL** and **Service Role Key** under Project Settings → API
 
-Generates an explainable race-day time prediction.
-- Uses recent race-effort runs above a minimum distance
-- Applies distance scaling (Riegel-style power law)
-- Adjusts for efficiency trend
-- Applies a small penalty when readiness risk is elevated
-- Shows which runs influenced the prediction
+### 3. Configure secrets
 
-No black-box ML — every assumption is visible and tunable.
+Create `.streamlit/secrets.toml` in the project root:
 
-#### Tab 6 — Explanations & Interpretations
+```toml
+[strava]
+client_id     = "your_strava_client_id"
+client_secret = "your_strava_client_secret"
+redirect_uri  = "http://localhost:8501"
 
-Provides explanations and interpretations for the various metrics and calculations.
-- Explanations for the various metrics and calculations
-- Explanations for the various charts and plots
-- Explanations for the various tables and data
-- Explanations for the various models and algorithms
-- Explanations for the various assumptions and limitations
+[supabase]
+url = "https://your-project.supabase.co"
+key = "your_service_role_key"
+```
 
-### Why this project
+> **Never commit this file.** It is already listed in `.gitignore`.
 
-This project demonstrates:
-- Real-world data wrangling (nested JSON, time-series, streams)
-- Feature engineering from physiological signals
-- Analytical modeling under noisy conditions
-- Clear, user-driven explainability
-- Practical sports analytics design
+### 4. Install dependencies and run
 
-It's intended both as a training tool for runners and a portfolio project for data science and sports analytics roles.
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Open [http://localhost:8501](http://localhost:8501), click **Connect with Strava**, and authorise the app. Your activities will sync automatically.
+
+---
+
+## Sidebar settings
+
+
+| Setting                  | Effect                                                        |
+| ------------------------ | ------------------------------------------------------------- |
+| **Max HR**               | Drives all HR zone calculations and TRIMP intensity           |
+| **Resting HR**           | Used in heart-rate reserve for full Banister TRIMP            |
+| **Biological sex**       | Selects Banister's sex-specific exponential coefficients      |
+| **HR Zone Boundaries**   | Adjustable % thresholds; actual bpm shown live                |
+| **Target race distance** | Sets the reference for long-run threshold and race prediction |
+| **Race-effort HR band**  | Defines the intensity window used in Pace & Efficiency        |
+| **Long-run threshold**   | Minimum distance (% of race) to qualify as a long run         |
+| **Readiness window**     | Lookback period for Recovery & Risk tab                       |
+| **Prediction lookback**  | How far back Race Predictor searches for qualifying efforts   |
+
+
+Settings are saved per user to Supabase and restored automatically on next login.
+
+---
+
+## Multi-user support
+
+The app is designed for small groups (up to ~20 users). Each user authenticates independently via Strava OAuth. Data is stored and queried per `athlete_id` — no user can access another's data. Row Level Security on Supabase tables blocks any direct API access via the anon key.
+
+---
+
+## Requirements
+
+See `requirements.txt`. Key dependencies:
+
+```
+streamlit
+supabase
+plotly
+pandas
+numpy
+requests
+streamlit-cookies-controller
+```
+
