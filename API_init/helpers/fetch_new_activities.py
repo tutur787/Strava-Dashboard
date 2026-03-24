@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from stravalib import Client
 
-STREAM_TYPES = ["time", "latlng", "distance", "altitude", "velocity_smooth", "heartrate", "cadence", "watts"]
+STREAM_TYPES = ["time", "latlng", "distance", "altitude", "velocity_smooth", "heartrate", "cadence", "watts", "grade_smooth"]
 
 def _load_json(path, default):
     if not os.path.exists(path):

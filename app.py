@@ -56,6 +56,7 @@ from analytics import (
     estimate_vo2max,
     compute_consistency,
     compute_cadence_stats,
+    compute_activity_gap,
     generate_insight,
     make_hr_zones,
 )
@@ -480,7 +481,9 @@ if len(activities) > 0 and "start_dt_local" in activities.columns:
         _hist_start = pd.Timestamp(activities["start_dt_local"].min())
         _hist_end   = pd.Timestamp(activities["start_dt_local"].max())
         daily_all, weekly_all = build_daily_weekly(
-            activities, max_hr=max_hr, date_range=(_hist_start, _hist_end)
+            activities, max_hr=max_hr, date_range=(_hist_start, _hist_end),
+            rest_hr=settings.get("rest_hr", 50),
+            gender=settings.get("gender", "Men"),
         )
     except Exception:
         pass
@@ -494,6 +497,20 @@ cadence_df = pd.DataFrame()
 if len(df_range) > 0 and streams_by_id:
     try:
         cadence_df = compute_cadence_stats(df_range, streams_by_id)
+    except Exception:
+        pass
+
+# ── Per-activity GAP pace (grade-adjusted) ────────────────────────────
+if len(df_range) > 0 and streams_by_id:
+    try:
+        _gap_map = {}
+        for _aid, _s in streams_by_id.items():
+            _g = compute_activity_gap(_s)
+            if _g is not None:
+                _gap_map[int(_aid)] = _g
+        if _gap_map:
+            df_range = df_range.copy()
+            df_range["gap_pace_min_per_km"] = df_range["id"].astype(int).map(_gap_map)
     except Exception:
         pass
 

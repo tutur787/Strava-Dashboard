@@ -74,35 +74,30 @@ def render(data: dict, settings: dict) -> None:
 
     # Stacked flags chart -- shows which flags fired each day
     flag_map = {
-        "flag_acwr_high":      "ACWR high (>1.5)",
-        "flag_acwr_very_high": "ACWR very high (>1.8)",
-        "flag_low_rest":       "Low rest (<2 days/wk)",
-        "flag_big_day":        "Outlier load day",
+        "flag_acwr_high":      "ACWR >1.5",
+        "flag_acwr_very_high": "ACWR >1.8",
+        "flag_low_rest":       "Low rest",
+        "flag_big_day":        "Outlier load",
     }
-    flag_colors = {
-        "ACWR high (>1.5)":      "#fd8d3c",
-        "ACWR very high (>1.8)": "#d62728",
-        "Low rest (<2 days/wk)": "#6baed6",
-        "Outlier load day":      "#9e9ac8",
-    }
-    flags_long = d_focus[["date_ts"] + list(flag_map.keys())].copy()
-    flags_long = flags_long.rename(columns=flag_map)
-    flags_melted = flags_long.melt(id_vars="date_ts", var_name="Flag", value_name="Active")
-    flags_melted = flags_melted[flags_melted["Active"] == 1]
+    _flag_cols = list(flag_map.keys())
+    _flagged_days = d_focus[d_focus[_flag_cols].any(axis=1)].copy()
 
-    if len(flags_melted) == 0:
+    if len(_flagged_days) == 0:
         st.success("No alert flags in the selected window.")
     else:
-        fig_flags = px.bar(
-            flags_melted, x="date_ts", y="Active", color="Flag",
-            title="Alert flags per day \u2014 hover to see which flags fired",
-            labels={"date_ts": "Date", "Active": "Flags"},
-            color_discrete_map=flag_colors,
-            barmode="stack",
-        )
-        fig_flags.update_layout(height=280, margin=dict(l=10, r=10, t=50, b=10),
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
-        st.plotly_chart(fig_flags, use_container_width=True)
+        _ftable = _flagged_days[["date_ts", "acwr", "rest_days_last7"] + _flag_cols].copy()
+        _ftable = _ftable.rename(columns={
+            "date_ts": "Date", "acwr": "ACWR", "rest_days_last7": "Rest days (last 7)",
+            **flag_map,
+        })
+        _ftable["Date"] = _ftable["Date"].dt.strftime("%Y-%m-%d")
+        _ftable["ACWR"] = _ftable["ACWR"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "\u2014")
+        _ftable["Rest days (last 7)"] = _ftable["Rest days (last 7)"].apply(lambda x: f"{int(x)}" if pd.notna(x) else "\u2014")
+        for _fc in flag_map.values():
+            _ftable[_fc] = _ftable[_fc].map({1: "\u26a0\ufe0f", 0: ""})
+        _ftable = _ftable.sort_values("Date", ascending=False)
+        st.caption(f"**{len(_flagged_days)} days** with at least one alert flag in the selected window.")
+        st.dataframe(_ftable, hide_index=True, use_container_width=True)
 
     # Weekly risk: load spikes & monotony
     st.subheader("Weekly stress patterns")

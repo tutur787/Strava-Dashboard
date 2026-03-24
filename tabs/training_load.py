@@ -62,7 +62,7 @@ def render(data: dict, settings: dict) -> None:
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Weekly distance", f"{_wk_dist:.1f} {_d_unit(use_miles)}", dist_delta)
     k2.metric("Weekly HR load", f"{latest_week['weekly_load_hr']:.1f}", load_delta,
-              help="load = duration_min \u00d7 (avgHR / maxHR). Only runs with HR data contribute.")
+              help="Banister TRIMP: duration \u00d7 HRr \u00d7 exp(coefficient \u00d7 HRr), where HRr = (avgHR \u2212 restHR) \u00f7 (maxHR \u2212 restHR). Only runs with HR data contribute.")
     k3.metric("ACWR", f"{latest_day['acwr']:.2f}" if pd.notna(latest_day["acwr"]) else "N/A",
               f"{acwr_emoji} {acwr_label}",
               help="Acute:Chronic Workload Ratio. 0.8\u20131.3 is the balanced zone.")
@@ -77,7 +77,7 @@ def render(data: dict, settings: dict) -> None:
     st.caption(
         "**Fitness** (CTL, 28d EWMA) builds slowly. **Fatigue** (ATL, 7d EWMA) spikes fast. "
         "**Form / TSB** = Fitness \u2212 Fatigue. Positive TSB = fresh; negative = fatigued. "
-        "Race-ready zone: TSB between +5 and +25."
+        "Race-ready zone: TSB between +10 and +50 (full Banister TRIMP units)."
     )
 
     # Limit PMC to last 90 days for readability; EWMA was computed on full history
@@ -87,15 +87,15 @@ def render(data: dict, settings: dict) -> None:
     pmc_fig = go.Figure()
 
     # TSB form-zone bands
-    pmc_fig.add_hrect(y0=5, y1=25, fillcolor="rgba(82,232,138,0.08)", line_width=0,
+    pmc_fig.add_hrect(y0=10, y1=50, fillcolor="rgba(82,232,138,0.08)", line_width=0,
                       annotation_text="\U0001f3c1 Race-ready", annotation_position="top left",
                       annotation=dict(font_size=11, font_color="rgba(82,232,138,0.7)"),
                       yref="y2")
-    pmc_fig.add_hrect(y0=-30, y1=5, fillcolor="rgba(253,141,60,0.05)", line_width=0,
+    pmc_fig.add_hrect(y0=-75, y1=10, fillcolor="rgba(253,141,60,0.05)", line_width=0,
                       annotation_text="\u26a1 Productive training", annotation_position="top left",
                       annotation=dict(font_size=11, font_color="rgba(253,141,60,0.6)"),
                       yref="y2")
-    pmc_fig.add_hrect(y0=-100, y1=-30, fillcolor="rgba(214,39,40,0.07)", line_width=0,
+    pmc_fig.add_hrect(y0=-300, y1=-75, fillcolor="rgba(214,39,40,0.07)", line_width=0,
                       annotation_text="\U0001f623 High fatigue \u2014 recover", annotation_position="top left",
                       annotation=dict(font_size=11, font_color="rgba(214,39,40,0.6)"),
                       yref="y2")
@@ -144,13 +144,13 @@ def render(data: dict, settings: dict) -> None:
 
     # TSB snapshot
     latest_tsb = float(daily.sort_values("date_ts").iloc[-1]["tsb"]) if "tsb" in daily.columns else 0.0
-    if latest_tsb > 20:
+    if latest_tsb > 50:
         st.success(f"Current form (TSB): **+{latest_tsb:.0f}** \u2014 You're fresh. Good window to race or do a breakthrough session.")
-    elif latest_tsb > 5:
+    elif latest_tsb > 10:
         st.success(f"Current form (TSB): **+{latest_tsb:.0f}** \u2014 Good form. Training will be well absorbed.")
-    elif latest_tsb > -10:
+    elif latest_tsb > -25:
         st.info(f"Current form (TSB): **{latest_tsb:.0f}** \u2014 Productive training zone. Slightly fatigued but adapting.")
-    elif latest_tsb > -30:
+    elif latest_tsb > -75:
         st.warning(f"Current form (TSB): **{latest_tsb:.0f}** \u2014 Carrying fatigue. Monitor recovery closely.")
     else:
         st.error(f"Current form (TSB): **{latest_tsb:.0f}** \u2014 Heavy fatigue accumulated. Consider a recovery block.")

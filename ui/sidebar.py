@@ -50,6 +50,22 @@ def render_sidebar(
             help="Used to compute intensity = avgHR / maxHR.",
         )
 
+        rest_hr = st.number_input(
+            "Resting HR (bpm)",
+            min_value=30,
+            max_value=100,
+            value=int(_prefs.get("rest_hr", 50)),
+            step=1,
+            help="Used in the full Banister TRIMP formula for training load. Measure lying down first thing in the morning.",
+        )
+
+        gender = st.selectbox(
+            "Biological sex (for TRIMP)",
+            ["Men", "Women"],
+            index=0 if _prefs.get("gender", "Men") == "Men" else 1,
+            help="Banister's TRIMP uses sex-specific exponential coefficients (men: 0.64/1.92, women: 0.86/1.67).",
+        )
+
         with st.expander("HR Zone Boundaries (% of max HR)"):
             st.caption("Drag to adjust where each zone begins and ends. These boundaries drive both run classification and the zone breakdown chart.")
             hr_z1 = st.slider("Z1/Z2 boundary", 50, 75, int(_prefs.get("hr_z1", 60)), step=1,
@@ -137,6 +153,8 @@ def render_sidebar(
                          help="Save current sidebar values so they reload next time"):
                 _prefs_to_save = {
                     "max_hr": int(max_hr),
+                    "rest_hr": int(rest_hr),
+                    "gender": str(gender),
                     "hr_z1": int(hr_z1 * 100), "hr_z2": int(hr_z2 * 100),
                     "hr_z3": int(hr_z3 * 100), "hr_z4": int(hr_z4 * 100),
                     "race_choice": race_choice,
@@ -240,6 +258,8 @@ def render_sidebar(
     settings = {
         "use_miles": use_miles,
         "max_hr": int(max_hr),
+        "rest_hr": int(rest_hr),
+        "gender": str(gender),
         "race_choice": race_choice,
         "race_km": float(race_km),
         "race_km_label": race_km_label,

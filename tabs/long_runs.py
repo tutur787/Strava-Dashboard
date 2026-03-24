@@ -11,6 +11,7 @@ from analytics import (
     _d_unit,
     _dist_fmt,
     _p_unit,
+    _pace_axis_ticks,
     _safe_array,
     build_fatigue_table,
     build_within_run_df,
@@ -83,6 +84,44 @@ def render(data: dict, settings: dict) -> None:
         fig_hr.update_layout(height=340, margin=dict(l=10, r=10, t=50, b=10))
         st.plotly_chart(fig_hr, use_container_width=True)
 
+    # Aerobic decoupling trend — the primary long-run fitness metric
+    _dec_df = fatigue.sort_values("start_dt_local").dropna(subset=["decoupling"])
+    if len(_dec_df) >= 2:
+        fig_dec = go.Figure()
+        fig_dec.add_hrect(
+            y0=-0.05, y1=0.05,
+            fillcolor="rgba(61,186,110,0.10)", line_width=0,
+            annotation_text="\u2713 Good aerobic fitness (<5%)",
+            annotation_position="top left",
+            annotation=dict(font_size=10, font_color="rgba(61,186,110,0.85)"),
+        )
+        fig_dec.add_trace(go.Scatter(
+            x=_dec_df["start_dt_local"],
+            y=_dec_df["decoupling"],
+            mode="lines+markers",
+            name="Aerobic decoupling",
+            line=dict(color="#6baed6", width=2),
+            marker=dict(size=7),
+        ))
+        fig_dec.add_hline(y=0.05, line_dash="dash", line_color="orange",
+                          annotation_text="5% \u2014 aerobic stress threshold",
+                          annotation_position="top left")
+        fig_dec.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)", line_width=1)
+        fig_dec.update_layout(
+            height=320,
+            title="Aerobic decoupling trend \u2014 key long-run fitness indicator",
+            xaxis_title="Date",
+            yaxis_title="Decoupling (speed/HR: 2nd half vs 1st half)",
+            margin=dict(l=10, r=10, t=50, b=10),
+        )
+        st.plotly_chart(fig_dec, use_container_width=True)
+        st.caption(
+            "**Aerobic decoupling** measures how much your speed\u00f7HR efficiency drops from the first to the second half of a long run. "
+            "< 5% = aerobic system held up well \u2014 a sign of good aerobic base. "
+            "> 5% = system becoming stressed (normal early in training; should improve as base develops). "
+            "Friel's Pa:HR metric."
+        )
+
     st.subheader("Inspect a long run")
     fatigue = fatigue.sort_values("start_dt_local", ascending=False)
 
@@ -130,11 +169,20 @@ def render(data: dict, settings: dict) -> None:
                                  y=run_df["gap_pace"] * _lr_pace_factor,
                                  mode="lines", name="Grade-adjusted pace (GAP)",
                                  line=dict(dash="dot", color="#fd8d3c")))
+    _lr_pace_vals = run_df["pace_smooth"].dropna() * _lr_pace_factor
+    _lr_pace_min = float(_lr_pace_vals.quantile(0.05)) if len(_lr_pace_vals) > 0 else 4.0
+    _lr_pace_max = float(_lr_pace_vals.quantile(0.95)) if len(_lr_pace_vals) > 0 else 8.0
+    if has_gap:
+        _gap_vals = run_df["gap_pace"].dropna() * _lr_pace_factor
+        if len(_gap_vals) > 0:
+            _lr_pace_min = min(_lr_pace_min, float(_gap_vals.quantile(0.05)))
+            _lr_pace_max = max(_lr_pace_max, float(_gap_vals.quantile(0.95)))
+    _lrtv, _lrtt = _pace_axis_ticks(_lr_pace_min, _lr_pace_max, step=0.25)
     fig.update_layout(
         height=420, margin=dict(l=10, r=10, t=30, b=10),
         xaxis_title=f"Distance ({_d_unit(use_miles)})", yaxis_title=f"Pace ({_p_unit(use_miles)})",
     )
-    fig.update_yaxes(autorange="reversed")
+    fig.update_yaxes(autorange="reversed", tickvals=_lrtv, ticktext=_lrtt)
 
     if np.any(np.isfinite(run_df["hr_smooth"])):
         fig.add_trace(go.Scatter(x=run_df["distance_km"] * _lr_dist_factor, y=run_df["hr_smooth"],

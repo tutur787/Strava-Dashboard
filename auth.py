@@ -98,7 +98,7 @@ def fetch_activity_streams_api(activity_id: int, access_token: str) -> dict:
     """Fetch streams for a single activity (rate-limit safe)."""
     resp = _strava_get(
         f"{STRAVA_API_BASE}/activities/{activity_id}/streams", access_token,
-        params={"keys": "time,heartrate,velocity_smooth,cadence,altitude,latlng", "key_by_type": "true"},
+        params={"keys": "time,heartrate,velocity_smooth,cadence,altitude,latlng,grade_smooth", "key_by_type": "true"},
     )
     return resp.json() if resp.status_code == 200 else {}
 

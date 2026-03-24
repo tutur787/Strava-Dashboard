@@ -124,6 +124,8 @@ def build_daily_weekly(
     activities: pd.DataFrame,
     max_hr: int,
     date_range: Tuple[pd.Timestamp, pd.Timestamp],
+    rest_hr: int = 50,
+    gender: str = "Men",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     start, end = date_range
     # Use ALL activities for EWMA so chronic load (28d) has proper history even when
@@ -131,7 +133,18 @@ def build_daily_weekly(
     df = activities.copy()
 
     df["hr_intensity"] = df["avg_hr"] / float(max_hr)
-    df["load_hr"] = df["duration_min"] * df["hr_intensity"]
+
+    # Full Banister TRIMP using heart-rate reserve (HRr).
+    # Men:   TRIMP = t × HRr × 0.64 × e^(1.92·HRr)
+    # Women: TRIMP = t × HRr × 0.86 × e^(1.67·HRr)
+    # Source: Banister EW (1991). Physiological Testing of Elite Athletes.
+    _hr_range = max(float(max_hr) - float(rest_hr), 1.0)
+    hr_reserve = ((df["avg_hr"] - float(rest_hr)) / _hr_range).clip(lower=0.0, upper=1.0)
+    if gender == "Women":
+        _trimp = df["duration_min"] * hr_reserve * 0.86 * np.exp(1.67 * hr_reserve)
+    else:
+        _trimp = df["duration_min"] * hr_reserve * 0.64 * np.exp(1.92 * hr_reserve)
+    df["load_hr"] = _trimp.where(df["avg_hr"].notna(), 0.0)
 
     daily = (
         df.groupby("date", as_index=False)
@@ -219,6 +232,27 @@ def acwr_band(acwr: float) -> Tuple[str, str]:
 # -----------------------------
 # Unit helpers
 # -----------------------------
+def _pace_axis_ticks(min_val: float, max_val: float, step: float = 0.5):
+    """
+    Generate (tickvals, ticktext) for a Plotly pace axis in M:SS format.
+    step is in minutes (default 0.5 = every 30 seconds).
+    """
+    import math
+    if not (np.isfinite(min_val) and np.isfinite(max_val)) or min_val >= max_val:
+        return [], []
+    lo = math.floor(min_val / step) * step
+    hi = math.ceil(max_val / step) * step
+    vals, labels = [], []
+    v = lo
+    while v <= hi + 1e-9:
+        m = int(v); s = int(round((v - m) * 60))
+        if s == 60: m += 1; s = 0
+        vals.append(round(v, 6))
+        labels.append(f"{m}:{s:02d}")
+        v += step
+    return vals, labels
+
+
 def _format_pace(min_per_km: float, use_miles: bool = False) -> str:
     """Format pace as M:SS/km or M:SS/mi."""
     if min_per_km is None or (isinstance(min_per_km, float) and np.isnan(min_per_km)):
@@ -688,6 +722,89 @@ def compute_hr_zones(
 
 
 # -----------------------------
+# Jack Daniels training paces from VDOT
+# -----------------------------
+def estimate_training_paces(vdot: float, use_miles: bool = False) -> list:
+    """
+    Derive Jack Daniels' five training zones from a VDOT estimate.
+    Each zone corresponds to a % of VO2max. Velocity is back-calculated
+    from the Daniels/Gilbert quadratic: VO2 = -4.60 + 0.182258v + 0.000104v²
+    Returns a list of dicts for display.
+    Source: Daniels J (2005). Daniels' Running Formula, 2nd ed.
+    """
+    def _pace_from_frac(frac: float) -> float:
+        vo2 = frac * vdot
+        a, b, c = 0.000104, 0.182258, -4.60 - vo2
+        disc = b ** 2 - 4 * a * c
+        if disc < 0:
+            return np.nan
+        v = (-b + np.sqrt(disc)) / (2 * a)  # m/min
+        return (1000.0 / v) if v > 0 else np.nan  # min/km
+
+    zones = [
+        ("Easy",       0.70, "Conversational. Base building & recovery. Most of your running.",      "65–75% VO₂max"),
+        ("Marathon",   0.80, "Aerobic threshold. Goal race pace for the marathon.",                   "75–84% VO₂max"),
+        ("Threshold",  0.86, "Comfortably hard. Sustained 20–60 min. Raises lactate threshold.",     "83–88% VO₂max"),
+        ("Interval",   0.98, "VO₂max pace. 3–5 min reps with equal recovery.",                       "95–100% VO₂max"),
+        ("Repetition", 1.05, "Speed & economy. 200–400 m reps with full recovery.",                  ">100% VO₂max"),
+    ]
+    rows = []
+    for name, frac, purpose, intensity in zones:
+        pace_km = _pace_from_frac(frac)
+        if use_miles:
+            pace_disp = pace_km / KM_TO_MILES if np.isfinite(pace_km) else np.nan
+            unit = "min/mi"
+        else:
+            pace_disp = pace_km
+            unit = "min/km"
+        if np.isfinite(pace_disp):
+            m = int(pace_disp)
+            s = int(round((pace_disp - m) * 60))
+            if s == 60:
+                m += 1; s = 0
+            pace_str = f"{m}:{s:02d}/{unit}"
+        else:
+            pace_str = "—"
+        rows.append({"Zone": name, "Pace": pace_str, "Intensity": intensity, "Purpose": purpose})
+    return rows
+
+
+# -----------------------------
+# Grade-adjusted pace (Minetti)
+# -----------------------------
+def compute_activity_gap(streams: dict) -> Optional[float]:
+    """
+    Compute overall grade-adjusted pace (GAP) for a single activity (min/km).
+    Uses the Minetti metabolic cost polynomial on the grade_smooth stream.
+    GAP = time-weighted average of (actual_pace × C_flat / C_grade).
+    Returns None when grade_smooth stream is unavailable.
+    """
+    grade_arr = _safe_array(streams, "grade_smooth")
+    v_arr     = _safe_array(streams, "velocity_smooth")
+    t_arr     = _safe_array(streams, "time")
+    if grade_arr is None or v_arr is None or t_arr is None:
+        return None
+
+    n = min(len(grade_arr), len(v_arr), len(t_arr))
+    grade = np.clip(grade_arr[:n] / 100.0, -0.40, 0.40)
+    v     = v_arr[:n]
+    t     = t_arr[:n]
+
+    c_g    = 280.5*grade**5 - 58.7*grade**4 - 76.8*grade**3 + 51.9*grade**2 + 19.6*grade + 2.5
+    c_flat = 2.5
+    gap_factor  = np.where(c_g > 0.5, c_flat / c_g, np.nan)
+    pace_min_km = np.where(v > 0, (1000.0 / v) / 60.0, np.nan)
+    gap_pace    = pace_min_km * gap_factor
+
+    dt = np.diff(t, prepend=t[0])
+    dt[0] = 1.0
+    valid = np.isfinite(gap_pace) & (gap_pace > 2.0) & (gap_pace < 20.0)
+    if not np.any(valid):
+        return None
+    return float(np.sum(gap_pace[valid] * dt[valid]) / np.sum(dt[valid]))
+
+
+# -----------------------------
 # VO2max estimate (Jack Daniels VDOT)
 # -----------------------------
 def estimate_vo2max(bests: dict) -> Optional[float]:
@@ -854,7 +971,7 @@ def generate_insight(daily_full: pd.DataFrame, activities: pd.DataFrame) -> Tupl
         return (f"Load is elevated (ACWR {acwr:.2f}). An easy or rest day now will let this training adaptation land.", "warning")
     if acwr > 1.3:
         return (f"ACWR slightly high ({acwr:.2f}) \u2014 building fast. Prioritise sleep and nutrition this week.", "warning")
-    if tsb < -30:
+    if tsb < -75:
         return (f"Heavy fatigue (TSB {tsb:.0f}). A 5\u20137 day recovery block will unlock your next fitness jump.", "warning")
 
     # Run type balance signal (last 4 weeks)
@@ -876,9 +993,9 @@ def generate_insight(daily_full: pd.DataFrame, activities: pd.DataFrame) -> Tupl
                         "A quality session this week will help build race-specific fitness.", "info")
 
     # Freshness signals
-    if tsb > 20:
+    if tsb > 50:
         return (f"You're fresh and race-ready (TSB +{tsb:.0f}). A quality session or tune-up race will use this well.", "success")
-    if tsb > 5:
+    if tsb > 10:
         return f"Good form (TSB +{tsb:.0f}). Training hard today will be well absorbed.", "success"
 
     # Inactivity signals

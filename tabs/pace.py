@@ -7,7 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from analytics import _d_unit, _format_pace, _p_unit
+from analytics import _d_unit, _format_pace, _p_unit, _pace_axis_ticks
 from config import KM_TO_MILES, RUN_TYPE_COLORS
 
 
@@ -79,7 +79,8 @@ def render(data: dict, settings: dict) -> None:
             title="Pace vs HR \u2014 coloured by run type",
             category_orders={"run_type": list(RUN_TYPE_COLORS.keys())},
         )
-        fig_scatter.update_yaxes(autorange="reversed")
+        _stv, _stt = _pace_axis_ticks(d2["pace_disp"].min(), d2["pace_disp"].max())
+        fig_scatter.update_yaxes(autorange="reversed", tickvals=_stv, ticktext=_stt)
         fig_scatter.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
         st.plotly_chart(fig_scatter, use_container_width=True)
 
@@ -91,8 +92,9 @@ def render(data: dict, settings: dict) -> None:
             title="Pace distribution",
             labels={"pace_disp": _pace_lbl, "count": "Runs"},
         )
+        _dtv, _dtt = _pace_axis_ticks(d2["pace_disp"].min(), d2["pace_disp"].max())
         fig_dist.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
-        fig_dist.update_xaxes(autorange="reversed")
+        fig_dist.update_xaxes(autorange="reversed", tickvals=_dtv, ticktext=_dtt)
         st.plotly_chart(fig_dist, use_container_width=True)
         st.caption("X-axis is reversed \u2014 bars further left represent faster paces.")
 
@@ -112,6 +114,7 @@ def render(data: dict, settings: dict) -> None:
     fig_pace.add_trace(go.Scatter(x=trend_df["start_dt_local"], y=trend_df["pace_roll_disp"],
                                   mode="lines", name="Rolling median (5 runs)",
                                   line=dict(width=2.5)))
+    _ptv, _ptt = _pace_axis_ticks(trend_df["pace_disp"].min(), trend_df["pace_disp"].max())
     fig_pace.update_layout(
         height=340,
         title="Pace trend at comparable effort",
@@ -120,7 +123,7 @@ def render(data: dict, settings: dict) -> None:
         margin=dict(l=10, r=10, t=50, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
-    fig_pace.update_yaxes(autorange="reversed")
+    fig_pace.update_yaxes(autorange="reversed", tickvals=_ptv, ticktext=_ptt)
     # Trend direction annotation
     if len(trend_df) >= 5:
         _roll = trend_df["pace_roll_disp"].dropna()
@@ -149,6 +152,68 @@ def render(data: dict, settings: dict) -> None:
     st.plotly_chart(fig_pace, use_container_width=True)
 
     st.divider()
+
+    # ── Grade-adjusted pace (GAP) comparison ─────────────────────
+    if "gap_pace_min_per_km" in d2.columns and d2["gap_pace_min_per_km"].notna().sum() >= 3:
+        st.subheader("Grade-adjusted pace (GAP)")
+        st.caption(
+            "GAP normalises pace for gradient using Minetti's metabolic cost formula — it shows what your "
+            "flat-equivalent pace was on each run. A significant gap between raw and GAP pace means your "
+            "course was hilly. Runs without stream data show no GAP."
+        )
+        _gap_df = d2[d2["gap_pace_min_per_km"].notna()].copy()
+        _gap_df["gap_disp"] = _gap_df["gap_pace_min_per_km"] * _pace_factor
+        _gap_df["raw_disp"] = _gap_df["pace_min_per_km"] * _pace_factor
+
+        fig_gap = go.Figure()
+        fig_gap.add_trace(go.Scatter(
+            x=_gap_df["start_dt_local"], y=_gap_df["raw_disp"],
+            mode="markers", name="Actual pace",
+            marker=dict(size=6, color="#6baed6", opacity=0.7),
+        ))
+        fig_gap.add_trace(go.Scatter(
+            x=_gap_df["start_dt_local"], y=_gap_df["gap_disp"],
+            mode="markers", name="GAP (flat equivalent)",
+            marker=dict(size=6, color="#fd8d3c", opacity=0.7, symbol="diamond"),
+        ))
+        # Rolling median lines for each
+        _gap_df = _gap_df.sort_values("start_dt_local")
+        _raw_roll = _gap_df["raw_disp"].rolling(5, min_periods=1).median()
+        _gap_roll = _gap_df["gap_disp"].rolling(5, min_periods=1).median()
+        fig_gap.add_trace(go.Scatter(
+            x=_gap_df["start_dt_local"], y=_raw_roll,
+            mode="lines", name="Actual (rolling median)",
+            line=dict(color="#6baed6", width=2),
+        ))
+        fig_gap.add_trace(go.Scatter(
+            x=_gap_df["start_dt_local"], y=_gap_roll,
+            mode="lines", name="GAP (rolling median)",
+            line=dict(color="#fd8d3c", width=2, dash="dot"),
+        ))
+        _gtv, _gtt = _pace_axis_ticks(
+            min(_gap_df["raw_disp"].min(), _gap_df["gap_disp"].min()),
+            max(_gap_df["raw_disp"].max(), _gap_df["gap_disp"].max()),
+        )
+        fig_gap.update_yaxes(autorange="reversed", tickvals=_gtv, ticktext=_gtt, title=_pace_lbl)
+        fig_gap.update_layout(
+            height=380, xaxis_title="Date",
+            title="Actual pace vs grade-adjusted pace over time",
+            margin=dict(l=10, r=10, t=50, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        )
+        st.plotly_chart(fig_gap, use_container_width=True)
+
+        _avg_raw = _gap_df["pace_min_per_km"].median()
+        _avg_gap = _gap_df["gap_pace_min_per_km"].median()
+        _diff_sec = (_avg_gap - _avg_raw) * 60
+        if abs(_diff_sec) > 3:
+            _dir = "faster" if _diff_sec < 0 else "slower"
+            st.info(
+                f"On average your GAP is **{abs(_diff_sec):.0f}s/km {_dir}** than your actual pace — "
+                f"your typical course {'has notable elevation' if _diff_sec < 0 else 'is flatter than it appears'}."
+            )
+
+        st.divider()
 
     # ── Cadence analysis ─────────────────────────────────────────
     st.subheader("Running cadence")

@@ -12,6 +12,7 @@ from analytics import (
     _p_unit,
     _to_display_dist,
     build_calendar_heatmap,
+    estimate_training_paces,
 )
 from config import KM_TO_MILES, RUN_TYPE_COLORS
 
@@ -216,3 +217,18 @@ def render(data: dict, settings: dict) -> None:
                 "~5K time": ["> 30 min", "25\u201330 min", "20\u201325 min", "17\u201320 min", "< 17 min"],
             })
             st.dataframe(ref, hide_index=True, use_container_width=True)
+
+    # Jack Daniels training paces derived from VDOT
+    st.subheader("Jack Daniels training paces")
+    st.caption(
+        f"Prescribed training paces calculated from your VDOT of **{vo2max_est:.1f}**. "
+        "Each zone targets a specific physiological adaptation. "
+        "Source: *Daniels' Running Formula* (2005)."
+    )
+    _pace_rows = estimate_training_paces(vo2max_est, use_miles=use_miles)
+    _pace_df = pd.DataFrame(_pace_rows)
+    st.dataframe(_pace_df, hide_index=True, use_container_width=True)
+    st.caption(
+        "\u2139\ufe0f These are effort-based target paces, not GPS-enforced zones. "
+        "Easy pace is intentionally slow \u2014 most runners train their easy runs too fast."
+    )
