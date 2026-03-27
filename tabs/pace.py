@@ -181,9 +181,14 @@ def render(data: dict, settings: dict) -> None:
     if "gap_pace_min_per_km" in d2.columns and d2["gap_pace_min_per_km"].notna().sum() >= 3:
         st.subheader("Grade-adjusted pace (GAP)")
         st.caption(
-            "GAP normalises pace for gradient using Minetti's metabolic cost formula — it shows what your "
+            "GAP normalises pace for gradient using Minetti's metabolic cost formula \u2014 it shows what your "
             "flat-equivalent pace was on each run. A significant gap between raw and GAP pace means your "
-            "course was hilly. Runs without stream data show no GAP."
+            "course was hilly. Runs without stream data show no GAP. "
+            "Calibrated to road/track running (Minetti et al., 2002, treadmill study) \u2014 "
+            "for technical trail running, actual effort at steep grades may exceed the estimate. "
+            "\U0001f3d4\ufe0f **Altitude:** GAP only corrects for *gradient*, not for thin air. "
+            "If you train above ~1,500 m, your HR will be elevated and pace comparisons with sea-level efforts "
+            "will be affected \u2014 expect ~1% performance decline per 300 m above 1,500 m."
         )
         _gap_df = d2[d2["gap_pace_min_per_km"].notna()].copy()
         _gap_df["gap_disp"] = _gap_df["gap_pace_min_per_km"] * _pace_factor
@@ -291,8 +296,10 @@ def render(data: dict, settings: dict) -> None:
             fig_cad_hist.update_layout(height=280, margin=dict(l=10, r=10, t=50, b=10))
             st.plotly_chart(fig_cad_hist, use_container_width=True)
         st.caption(
-            "Higher cadence (shorter, quicker steps) generally reduces injury risk and improves running economy. "
-            "If your average is below 165 spm, try increasing by 5% every few weeks."
+            "Higher cadence (shorter, quicker steps) generally reduces impact loading and improves running economy. "
+            "If your average is below 165 spm, try increasing by ~5% over several weeks. "
+            "\u00b15 spm from the 170\u2013180 range is generally fine \u2014 individual optimal cadence varies with height, speed, and running style. "
+            "Source: Cavanagh & Kram (1989); Hunter et al. (2011)."
         )
 
     st.divider()
@@ -306,13 +313,30 @@ def render(data: dict, settings: dict) -> None:
             lambda v: f"{int(v)}:{int(round((v % 1)*60)):02d}/{_d_unit(use_miles)}" if pd.notna(v) else ""
         )
         _wdf["distance_disp"] = _wdf["distance_km"] * (KM_TO_MILES if use_miles else 1.0)
+        # Use heat index if humidity available, otherwise raw temp
+        if "humidity" in _wdf.columns and _wdf["humidity"].notna().any():
+            # Rothfusz heat index approximation (valid for T > 27°C / 80°F)
+            _T = _wdf["temp_c"]
+            _RH = _wdf["humidity"] * 100  # convert 0-1 fraction to %
+            _HI = (-8.78469475556 + 1.61139411 * _T + 2.33854883889 * _RH
+                   - 0.14611605 * _T * _RH - 0.012308094 * _T**2
+                   - 0.0164248277778 * _RH**2 + 0.002211732 * _T**2 * _RH
+                   + 0.00072546 * _T * _RH**2 - 0.000003582 * _T**2 * _RH**2)
+            # Only apply heat index where T > 20°C, otherwise use raw temp
+            _wdf = _wdf.copy()
+            _wdf["temp_display"] = np.where(_T > 20, _HI, _T)
+            _x_col = "temp_display"
+            _x_label = "Heat index (\u00b0C)"
+        else:
+            _x_col = "temp_c"
+            _x_label = "Temperature (\u00b0C)"
         fig_weather = px.scatter(
-            _wdf, x="temp_c", y="pace_disp",
+            _wdf, x=_x_col, y="pace_disp",
             color="run_type" if "run_type" in _wdf.columns else None,
             color_discrete_map=RUN_TYPE_COLORS,
-            hover_data={"pace_fmt": True, "distance_disp": ":.1f", "temp_c": ":.1f"},
-            labels={"temp_c": "Temperature (\u00b0C)", "pace_disp": _pace_lbl},
-            title="Pace vs temperature",
+            hover_data={"pace_fmt": True, "distance_disp": ":.1f", _x_col: ":.1f"},
+            labels={_x_col: _x_label, "pace_disp": _pace_lbl},
+            title=f"Pace vs {_x_label.lower()}",
             trendline="ols",
         )
         fig_weather.update_yaxes(autorange="reversed")

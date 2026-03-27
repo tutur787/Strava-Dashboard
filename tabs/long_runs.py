@@ -59,18 +59,27 @@ def render(data: dict, settings: dict) -> None:
         _dec_pct = med_dec * 100
         if abs(_dec_pct) < 5:
             with _banner_slot:
-                _banner(f"Median aerobic decoupling across {len(fatigue)} long runs: <strong>{_dec_pct:.1f}%</strong> — well within the 5% threshold. Aerobic base is solid.", "success")
-        elif _dec_pct < 10:
+                _banner(
+                    f"Median aerobic decoupling across {len(fatigue)} long runs: <strong>{_dec_pct:.1f}%</strong> "
+                    f"— aerobic base is solid. You can safely extend long run distance by 10% next cycle.", "success")
+        elif abs(_dec_pct) < 10:
             with _banner_slot:
-                _banner(f"Median aerobic decoupling: <strong>{_dec_pct:.1f}%</strong> — some aerobic stress on long runs. More easy aerobic volume will bring this down.", "warning")
+                _banner(
+                    f"Median aerobic decoupling: <strong>{_dec_pct:.1f}%</strong> — some aerobic stress. "
+                    "Add 2–3 easy runs per week for 4 weeks before increasing long run distance.", "warning")
         else:
             with _banner_slot:
-                _banner(f"Median aerobic decoupling: <strong>{_dec_pct:.1f}%</strong> — significant drift. Long runs are currently beyond aerobic capacity; shorten them or add base mileage first.", "warning")
+                _banner(
+                    f"Median aerobic decoupling: <strong>{_dec_pct:.1f}%</strong> — significant drift. "
+                    "Keep long runs at or below current distance until decoupling falls below 5%. "
+                    "Prioritise easy Z1–Z2 volume over the next 6–8 weeks.", "warning")
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Long runs analysed", f"{len(fatigue)}")
     k2.metric("Median pace fade", f"{med_pf*100:.1f}%",
-              help="<5% = good \u00b7 5\u201310% = moderate \u00b7 >10% = significant fade")
+              help="Positive = second half slower than first (fatigue/fade). "
+                   "< 0% = negative split (strong finish). "
+                   "< 5% = well-paced. 5\u201310% = moderate fade. > 10% = significant fade.")
     k3.metric("Median HR drift",  f"{med_hrd*100:.1f}%" if np.isfinite(med_hrd) else "N/A",
               help="How much HR rose in the second half vs first at similar pace. Higher = more cardiovascular stress.")
     k4.metric("Median aerobic efficiency loss", f"{med_dec*100:.1f}%" if np.isfinite(med_dec) else "N/A",
@@ -88,12 +97,16 @@ def render(data: dict, settings: dict) -> None:
             title="Pace fade per long run",
             labels={"start_dt_local": "Date", "pace_fade_pct": "Pace fade"},
         )
+        fig_pf.add_hline(y=0.0, line_dash="dot", line_color="rgba(82,232,138,0.6)",
+                         annotation_text="\u2193 Negative split (strong finish)", annotation_position="bottom left",
+                         annotation=dict(font_color="rgba(82,232,138,0.8)", font_size=11))
         fig_pf.add_hline(y=0.05, line_dash="dash", line_color="orange",
                          annotation_text="5% \u2014 moderate", annotation_position="top left")
         fig_pf.add_hline(y=0.10, line_dash="dash", line_color="red",
                          annotation_text="10% \u2014 significant", annotation_position="top left")
         fig_pf.update_layout(height=340, margin=dict(l=10, r=10, t=50, b=10))
         st.plotly_chart(fig_pf, use_container_width=True)
+        st.caption("Pace fade < 0% = negative split (second half faster than first). < 5% = well-paced. > 10% = significant fade.")
 
     with t2:
         fig_hr = px.line(
@@ -217,7 +230,11 @@ def render(data: dict, settings: dict) -> None:
 
     st.plotly_chart(fig, use_container_width=True)
     if has_gap:
-        st.caption("GAP (grade-adjusted pace) normalises for elevation using the Minetti metabolic cost formula \u2014 it shows what your flat equivalent effort was.")
+        st.caption(
+            "GAP (grade-adjusted pace) normalises for elevation using the Minetti metabolic cost formula \u2014 it shows what your flat equivalent effort was. "
+            "Calibrated to road/track running (Minetti et al., 2002, treadmill study) \u2014 "
+            "for technical trail running, actual effort at steep grades may exceed the estimate."
+        )
 
     # ── Route map ───────────────────────────────────────────────
     stream_df = streams_to_df(raw_s)

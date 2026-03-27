@@ -22,7 +22,7 @@ def render(data: dict, settings: dict) -> None:
     weekly_all = data["weekly_all"]
     df_range = data["df_range"]
 
-    st.subheader("Readiness, recovery & injury-risk proxies")
+    st.subheader("Readiness & recovery \u2014 load monitoring")
 
     def _banner(msg, level="info"):
         _s = {"success": "rgba(0,200,83,0.10);border-left:4px solid #00c853",
@@ -52,40 +52,55 @@ def render(data: dict, settings: dict) -> None:
 
     # Simple readiness label
     if risk_score < 25:
-        readiness = ("Low risk / likely fresh", "\U0001f7e2")
+        readiness = ("Low", "\U0001f7e2")
+        _risk_band = "Low"
     elif risk_score < 55:
-        readiness = ("Moderate risk", "\U0001f7e0")
+        readiness = ("Moderate", "\U0001f7e0")
+        _risk_band = "Moderate"
+    elif risk_score < 75:
+        readiness = ("Elevated", "\U0001f7e0")
+        _risk_band = "Elevated"
     else:
-        readiness = ("High risk", "\U0001f534")
+        readiness = ("High", "\U0001f534")
+        _risk_band = "High"
 
     # Insight banner
     if risk_score < 25:
-        _banner(f"Current risk score <strong>{risk_score:.0f}/100</strong> — you look fresh. Good window to add quality training or race.", "success")
+        _banner("Training load stress is <strong>Low</strong> \u2014 you look fresh. Good window to add quality training or race.", "success")
     elif risk_score < 55:
         _acwr_str = f"ACWR {acwr_val:.2f}" if pd.notna(acwr_val) else "moderate load"
-        _banner(f"Moderate risk score <strong>{risk_score:.0f}/100</strong> ({_acwr_str}) — training is productive but watch for early fatigue signs.", "info")
+        _banner(f"Training load stress is <strong>Moderate</strong> ({_acwr_str}) \u2014 training is productive but watch for early fatigue signs.", "info")
     else:
-        _banner(f"High risk score <strong>{risk_score:.0f}/100</strong> — elevated overreach risk. Prioritise recovery: easy runs, sleep, and at least 1–2 rest days.", "warning")
+        _banner(f"Training load stress is <strong>{_risk_band}</strong> \u2014 elevated overreach signal. Prioritise recovery: easy runs, sleep, and at least 1\u20132 rest days.", "warning")
 
     # KPI row
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Overreach/injury risk", f"{risk_score:.0f}/100", f"{readiness[1]} {readiness[0]}",
-              help="Composite proxy based on ACWR, recent load spikes, and rest days. Not medical advice.")
+    c1.metric("Training load stress", f"{readiness[1]} {_risk_band}",
+              help="Composite load-stress indicator (Low / Moderate / Elevated / High) based on ACWR (50%), "
+                   "recent load spikes (30%), and rest days (20%). A planning signal \u2014 not a validated injury predictor.")
     c2.metric("ACWR", f"{acwr_val:.2f}" if pd.notna(acwr_val) else "N/A",
-              help="0.8\u20131.3 = balanced. Above 1.5 = elevated overreach risk.")
+              help="0.8\u20131.3 = balanced training zone. Above 1.5 = elevated overreach signal. Above 1.8 = high. "
+                   "Note: ACWR thresholds are monitoring guidelines, not validated injury predictors "
+                   "(Impellizzeri et al., 2020, BJSM).")
     c3.metric("Rest days (last 7)", f"{int(latest['rest_days_last7'])}",
-              help="Days with near-zero HR load. Aim for at least 1\u20132 per week.")
+              help="Days with no recorded running load. Aim for at least 1\u20132 per week. "
+                   "Note: cross-training (cycling, swimming) is not included \u2014 actual cardiovascular load may be higher.")
     c4.metric("Acute load (7d EWMA)", f"{latest['acute_load']:.1f}")
 
-    st.caption("These are *proxies* \u2014 not medical advice. Use them as signals, not verdicts.")
+    st.caption(
+        "\u26a0\ufe0f **Interpretation note:** These are *load-monitoring signals*, not injury predictions. "
+        "The research literature does not support ACWR as a reliable injury-risk predictor "
+        "(Impellizzeri et al., 2020, BJSM). Use these numbers to guide training decisions — "
+        "not to forecast injury probability."
+    )
 
-    # Risk score trend
+    # Load stress trend
     fig_risk = px.area(
         d_focus,
         x="date_ts",
         y="risk_score",
-        title="Composite risk score (recent window)",
-        labels={"date_ts": "Date", "risk_score": "Risk score (0\u2013100)"},
+        title="Training load stress (recent window)",
+        labels={"date_ts": "Date", "risk_score": "Load stress (0\u2013100)"},
     )
     fig_risk.update_layout(height=320, margin=dict(l=10, r=10, t=50, b=10))
     st.plotly_chart(fig_risk, use_container_width=True)

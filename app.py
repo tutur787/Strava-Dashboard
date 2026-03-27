@@ -54,6 +54,8 @@ from analytics import (
     build_daily_weekly,
     compute_personal_bests,
     estimate_vo2max,
+    estimate_vo2max_range,
+    estimate_vo2max_submaximal,
     compute_consistency,
     compute_cadence_stats,
     compute_activity_gap,
@@ -94,7 +96,6 @@ import tabs.overview as tab_overview
 import tabs.training_load as tab_training_load
 import tabs.pace as tab_pace
 import tabs.long_runs as tab_long_runs
-import tabs.recovery as tab_recovery
 import tabs.race_predictor as tab_race_predictor
 import tabs.gear as tab_gear
 import tabs.guide as tab_guide
@@ -135,6 +136,14 @@ if _in_oauth_callback:
                 if _athlete_id_cb:
                     st.session_state["strava_athlete_id"]   = _athlete_id_cb
                     st.session_state["strava_athlete_name"] = _athlete_name_cb
+                # Store Strava sex so sidebar can pre-fill gender on first login
+                _strava_sex = _ath.get("sex", "")
+                if _strava_sex == "M":
+                    st.session_state["strava_athlete_sex"] = "Men"
+                elif _strava_sex == "F":
+                    st.session_state["strava_athlete_sex"] = "Women"
+                else:
+                    st.session_state["strava_athlete_sex"] = "Prefer not to say"
         st.query_params.clear()
         st.rerun()
 
@@ -199,9 +208,6 @@ use_miles        = settings["use_miles"]
 max_hr           = settings["max_hr"]
 race_km          = settings["race_km"]
 effort_band      = settings["effort_band"]
-only_runs        = settings["only_runs"]
-exclude_manual   = settings["exclude_manual"]
-exclude_trainer  = settings["exclude_trainer"]
 _hr_zones        = settings["_hr_zones"]
 
 # ── Landing page (unauthenticated) ────────────────────────────────────
@@ -350,18 +356,14 @@ if len(activities) > 0 and "start_dt_local" in activities.columns:
     if activities["start_dt_local"].dt.tz is not None:
         activities["start_dt_local"] = activities["start_dt_local"].dt.tz_localize(None)
 
-# ── Apply type filters to activities (affects ALL analytics) ──────────
-# Done here so build_daily_weekly, compute_personal_bests, etc. only
-# ever see the activity types the user has selected.
+# ── Apply activity type filters ───────────────────────────────────────
+# Always restrict to running activities and exclude manual entries.
 if len(activities) > 0:
-    if only_runs:
-        activities = activities[
-            activities["type"].astype(str).str.lower() == "run"
-        ].copy()
-    if exclude_manual and "manual" in activities.columns:
+    activities = activities[
+        activities["type"].astype(str).str.lower() == "run"
+    ].copy()
+    if "manual" in activities.columns:
         activities = activities[~activities["manual"].fillna(False)].copy()
-    if exclude_trainer and "trainer" in activities.columns:
-        activities = activities[~activities["trainer"].fillna(False)].copy()
 
 # ── Load streams from cache (Supabase → disk) ────────────────────────
 # Done before the sidebar block so we can decide whether to show
@@ -488,9 +490,18 @@ _weather_df = pd.DataFrame()
 if len(df_range) > 0:
     try:
         _weather_cols  = ["id", "date", "start_lat", "start_lng", "start_dt_local"]
-        _weather_input = df_range[
+        _weather_input_df = df_range[
             [c for c in _weather_cols if c in df_range.columns]
-        ].to_json(orient="records")
+        ].copy()
+        # Serialize timestamps as ISO strings, NOT epoch milliseconds (pandas default),
+        # so the weather function can parse "2024-03-15T10" correctly.
+        if "start_dt_local" in _weather_input_df.columns:
+            _weather_input_df["start_dt_local"] = pd.to_datetime(
+                _weather_input_df["start_dt_local"]
+            ).dt.strftime("%Y-%m-%dT%H:%M:%S")
+        if "date" in _weather_input_df.columns:
+            _weather_input_df["date"] = _weather_input_df["date"].astype(str)
+        _weather_input = _weather_input_df.to_json(orient="records")
         _weather_df = fetch_weather_for_activities(_weather_input)
     except Exception:
         _weather_df = pd.DataFrame()
@@ -515,11 +526,58 @@ if len(activities) > 0 and "start_dt_local" in activities.columns:
         pass
 
 # ── Shared analytics pre-computation ─────────────────────────────────
-bests       = compute_personal_bests(activities) if len(activities) > 0 else {}
-vo2max_est  = estimate_vo2max(bests)
-_vo2max_priority = [("best_marathon", "marathon PB"), ("best_hm", "half-marathon PB"),
-                    ("best_10k", "10K PB"), ("best_5k", "5K PB")]
-vo2max_source = next((lbl for key, lbl in _vo2max_priority if key in bests), None)
+# All-time bests — activity-level only (no stream sliding window) so results
+# are never limited to the currently-loaded stream date range.
+bests = compute_personal_bests(activities, streams_by_id=None) if len(activities) > 0 else {}
+
+# Recent bests (last 90 days) — preferred for VO2max so the estimate reflects
+# current fitness, not a peak effort from years ago
+_RECENT_DAYS = 90
+bests_recent = compute_personal_bests(activities, streams_by_id=streams_by_id, recent_days=_RECENT_DAYS) if len(activities) > 0 else {}
+
+_vo2max_priority = [("best_5k", "5K"), ("best_10k", "10K"), ("best_hm", "half-marathon"), ("best_marathon", "marathon")]
+
+# Use recent bests for VO2max; fall back to all-time with a staleness flag
+_bests_for_vo2max = bests_recent if bests_recent else bests
+_vo2max_used_recent = bool(bests_recent and estimate_vo2max(bests_recent) is not None)
+
+vo2max_est = estimate_vo2max(_bests_for_vo2max)
+if vo2max_est is None and not _vo2max_used_recent:
+    # No recent effort — fall back to all-time
+    vo2max_est = estimate_vo2max(bests)
+    _bests_for_vo2max = bests
+    _vo2max_used_recent = False
+
+vo2max_low, vo2max_high = estimate_vo2max_range(_bests_for_vo2max) if _bests_for_vo2max else (None, None)
+
+# Which distance/effort is driving the VO2max estimate
+vo2max_source_key = next((key for key, _ in _vo2max_priority if key in _bests_for_vo2max), None)
+vo2max_source = next((lbl for key, lbl in _vo2max_priority if key in _bests_for_vo2max), None)
+# Source metadata: date and whether it was stream-detected (embedded PR)
+vo2max_effort_meta = _bests_for_vo2max.get(vo2max_source_key, {}) if vo2max_source_key else {}
+vo2max_effort_date    = vo2max_effort_meta.get("date")
+vo2max_effort_source  = vo2max_effort_meta.get("source", "activity")   # "activity" or "stream"
+vo2max_effort_pace    = vo2max_effort_meta.get("pace_min_per_km_best") # outright fastest pace for display
+vo2max_effort_dist_km = vo2max_effort_meta.get("distance_km")          # canonical distance used
+vo2max_effort_n       = vo2max_effort_meta.get("n_efforts", 1)         # how many efforts went into median
+vo2max_effort_dates   = vo2max_effort_meta.get("effort_dates", [])     # S3: all effort dates used in median
+vo2max_is_recent      = _vo2max_used_recent
+# S6: flag whether VDOT is unavailable because stream data hasn't loaded
+vo2max_needs_streams  = (vo2max_est is None and not streams_by_id and len(activities) > 0)
+
+# ── Submaximal HR-based VO2max (works from training runs, no race needed) ──
+vo2max_submax = {"vo2max": None, "vo2max_low": None, "vo2max_high": None, "n_runs": 0}
+if len(activities) > 0:
+    try:
+        vo2max_submax = estimate_vo2max_submaximal(
+            activities,
+            max_hr=max_hr,
+            rest_hr=settings.get("rest_hr", 50),
+            recent_days=90,
+        )
+    except Exception:
+        pass
+
 consistency = compute_consistency(activities) if len(activities) > 0 else {}
 
 cadence_df = pd.DataFrame()
@@ -598,9 +656,23 @@ data: dict = {
     "streams_by_id": streams_by_id,
     "daily_all":     daily_all,
     "weekly_all":    weekly_all,
-    "bests":         bests,
-    "vo2max_est":    vo2max_est,
-    "vo2max_source": vo2max_source,
+    "bests":               bests,
+    "bests_recent":        bests_recent,
+    "vo2max_est":          vo2max_est,
+    "vo2max_low":          vo2max_low,
+    "vo2max_high":         vo2max_high,
+    "vo2max_source":       vo2max_source,
+    "vo2max_effort_date":     vo2max_effort_date,
+    "vo2max_effort_source":   vo2max_effort_source,
+    "vo2max_effort_pace":     vo2max_effort_pace,
+    "vo2max_effort_dist_km":  vo2max_effort_dist_km,
+    "vo2max_effort_n":        vo2max_effort_n,
+    "vo2max_is_recent":       vo2max_is_recent,
+    "vo2max_effort_dates":    vo2max_effort_dates,
+    "vo2max_needs_streams":   vo2max_needs_streams,
+    "vo2max_submax":          vo2max_submax,
+    "date_range":    (_start_ts, _end_ts),
+    "athlete_id":    int(_athlete_id) if _athlete_id else None,
     "consistency":   consistency,
     "cadence_df":    cadence_df,
     "_weather_df":   _weather_df,
@@ -653,7 +725,6 @@ _tab_labels = [
     "Training Load",
     "Pace & Efficiency",
     "Long Runs",
-    "Recovery & Risk",
     "Race Predictor",
     "Gear",
     "Guide",
@@ -675,16 +746,13 @@ with _tabs[3]:
     tab_long_runs.render(data, settings)
 
 with _tabs[4]:
-    tab_recovery.render(data, settings)
-
-with _tabs[5]:
     tab_race_predictor.render(data, settings)
 
-with _tabs[6]:
+with _tabs[5]:
     tab_gear.render(data, settings)
 
-with _tabs[7]:
+with _tabs[6]:
     tab_guide.render(data, settings)
 
-with _tabs[8]:
+with _tabs[7]:
     tab_streams.render(data, settings)

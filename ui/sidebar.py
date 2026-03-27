@@ -41,6 +41,7 @@ def render_sidebar(
         # Load saved preferences (populated after first auth)
         _prefs = st.session_state.get("_prefs", {})
 
+        # ── Athlete settings ──────────────────────────────────────────────
         max_hr = st.number_input(
             "Max HR (bpm)",
             min_value=120,
@@ -60,13 +61,34 @@ def render_sidebar(
             help="Used in the full Banister TRIMP formula for training load. Measure lying down first thing in the morning.",
         )
 
+        _gender_options = ["Men", "Women", "Non-binary", "Prefer not to say"]
+        # Priority: saved prefs → Strava athlete sex (first login) → Men
+        _strava_sex_default = st.session_state.get("strava_athlete_sex", "Men")
+        _saved_gender = _prefs.get("gender", _strava_sex_default)
+        _gender_idx = _gender_options.index(_saved_gender) if _saved_gender in _gender_options else 0
         gender = st.selectbox(
-            "Biological sex (for TRIMP)",
-            ["Men", "Women"],
-            index=0 if _prefs.get("gender", "Men") == "Men" else 1,
-            help="Banister's TRIMP uses sex-specific exponential coefficients (men: 0.64/1.92, women: 0.86/1.67).",
+            "Sex / gender (for TRIMP & VO\u2082max norms)",
+            _gender_options,
+            index=_gender_idx,
+            help=(
+                "Banister's TRIMP uses sex-specific exponential coefficients "
+                "(men: 0.64\u20091.92, women: 0.86\u20091.67). "
+                "Non-binary and 'Prefer not to say' use averaged coefficients (0.75\u20091.795) "
+                "and pooled ACSM VO\u2082max norms. "
+                "Pre-filled from your Strava profile on first login."
+            ),
         )
 
+        age = st.number_input(
+            "Age (years)",
+            min_value=15,
+            max_value=85,
+            value=int(_prefs.get("age", 35)),
+            step=1,
+            help="Used to select the correct ACSM VO\u2082max norms bracket for your age/sex and to estimate max HR if needed (220 \u2212 age).",
+        )
+
+        # ── HR Zone Boundaries ────────────────────────────────────────────
         with st.expander("HR Zone Boundaries (% of max HR)"):
             st.caption("Drag to adjust where each zone begins and ends. These boundaries drive both run classification and the zone breakdown chart.")
             _hz1_pct = st.slider("Z1/Z2 boundary", 50, 75, int(_prefs.get("hr_z1", 60)), step=1,
@@ -96,6 +118,9 @@ def render_sidebar(
             )
             _hr_zones = make_hr_zones(hr_z1, hr_z2, hr_z3, hr_z4)
 
+        # ── Target race ───────────────────────────────────────────────────
+        st.divider()
+        st.subheader("Target race")
         _race_keys = list(RACE_PRESETS_KM.keys())
         _saved_race = _prefs.get("race_choice", "Half Marathon")
         _race_idx = _race_keys.index(_saved_race) if _saved_race in _race_keys else 2
@@ -106,18 +131,7 @@ def render_sidebar(
         else:
             race_km = float(RACE_PRESETS_KM[race_choice])
 
-        lo_def, hi_def = RACE_EFFORT_DEFAULTS.get(race_choice, (0.84, 0.92))
-        st.subheader("Race-effort HR band")
-        effort_band = st.slider(
-            "HR intensity range (% of max HR)",
-            min_value=0.50,
-            max_value=1.00,
-            value=(float(_prefs.get("lo_hr", lo_def)), float(_prefs.get("hi_hr", hi_def))),
-            step=0.01,
-            help="Used in Tab 2 to track efficiency at race-relevant intensity.",
-        )
-        st.caption(f"**{int(effort_band[0] * max_hr)}–{int(effort_band[1] * max_hr)} bpm** at your current max HR of {max_hr} bpm")
-
+        # ── Long-run threshold ────────────────────────────────────────────
         lr_def = float(LONG_RUN_DEFAULTS.get(race_choice, 0.60))
         st.subheader("Long-run threshold")
         long_run_ratio_thresh = st.slider(
@@ -131,16 +145,20 @@ def render_sidebar(
         _lr_min_km = long_run_ratio_thresh * race_km
         st.caption(f"= **{_lr_min_km:.1f} km** / **{_lr_min_km * KM_TO_MILES:.1f} mi** minimum long run")
 
-        st.subheader("Readiness windows")
-        readiness_window_days = st.slider(
-            "Readiness lookback (days)",
-            min_value=14,
-            max_value=90,
-            value=int(_prefs.get("readiness_window_days", 42)),
-            step=7,
-            help="Tab 4 uses this window to summarize recent risk/readiness.",
+        # ── Race-effort HR band ───────────────────────────────────────────
+        lo_def, hi_def = RACE_EFFORT_DEFAULTS.get(race_choice, (0.84, 0.92))
+        st.subheader("Race-effort HR band")
+        effort_band = st.slider(
+            "HR intensity range (% of max HR)",
+            min_value=0.50,
+            max_value=1.00,
+            value=(float(_prefs.get("lo_hr", lo_def)), float(_prefs.get("hi_hr", hi_def))),
+            step=0.01,
+            help="Used in Tab 2 to track efficiency at race-relevant intensity.",
         )
+        st.caption(f"**{int(effort_band[0] * max_hr)}–{int(effort_band[1] * max_hr)} bpm** at your current max HR of {max_hr} bpm")
 
+        # ── Prediction window ─────────────────────────────────────────────
         st.subheader("Prediction window")
         prediction_lookback_days = st.slider(
             "Race prediction lookback (days)",
@@ -151,12 +169,7 @@ def render_sidebar(
             help="Tab 5 uses this window to predict race time.",
         )
 
-        st.divider()
-        st.subheader("Filters")
-        only_runs = st.checkbox("Only running activities", value=bool(_prefs.get("only_runs", True)))
-        exclude_manual = st.checkbox("Exclude manual activities", value=bool(_prefs.get("exclude_manual", True)))
-        exclude_trainer = st.checkbox("Exclude trainer/treadmill", value=bool(_prefs.get("exclude_trainer", False)))
-
+        # ── Display ───────────────────────────────────────────────────────
         st.divider()
         use_miles = st.toggle("Show distances in miles \U0001f1fa\U0001f1f8", value=bool(_prefs.get("use_miles", False)))
         show_streams_tab = st.checkbox("\U0001f527 Raw streams explorer", value=False,
@@ -168,22 +181,27 @@ def render_sidebar(
             st.divider()
             if st.button("\U0001f4be Save Settings", use_container_width=True,
                          help="Save current sidebar values so they reload next time"):
+                # Collect PMC planner values from session state (set by training_load tab widgets)
+                _pmc_race_date = st.session_state.get("pmc_race_date")
+                _pmc_taper_weeks = st.session_state.get("pmc_taper_weeks")
+                _pmc_build_choice = st.session_state.get("pmc_build_choice")
                 _prefs_to_save = {
                     "max_hr": int(max_hr),
                     "rest_hr": int(rest_hr),
                     "gender": str(gender),
+                    "age": int(age),
                     "hr_z1": int(hr_z1 * 100), "hr_z2": int(hr_z2 * 100),
                     "hr_z3": int(hr_z3 * 100), "hr_z4": int(hr_z4 * 100),
                     "race_choice": race_choice,
                     "race_km": float(race_km),
                     "lo_hr": float(effort_band[0]), "hi_hr": float(effort_band[1]),
                     "long_run_ratio_thresh": float(long_run_ratio_thresh),
-                    "readiness_window_days": int(readiness_window_days),
                     "prediction_lookback_days": int(prediction_lookback_days),
-                    "only_runs": bool(only_runs),
-                    "exclude_manual": bool(exclude_manual),
-                    "exclude_trainer": bool(exclude_trainer),
                     "use_miles": bool(use_miles),
+                    # PMC race day planner
+                    **({"pmc_race_date": str(_pmc_race_date)} if _pmc_race_date else {}),
+                    **({"pmc_taper_weeks": int(_pmc_taper_weeks)} if _pmc_taper_weeks is not None else {}),
+                    **({"pmc_build_choice": str(_pmc_build_choice)} if _pmc_build_choice else {}),
                 }
                 _save_aid = st.session_state.get("strava_athlete_id")
                 if _SUPABASE_ENABLED and _save_aid:
@@ -192,10 +210,10 @@ def render_sidebar(
                         st.error(f"Save failed: {_pref_err}")
                     else:
                         st.session_state["_prefs"] = _prefs_to_save
-                        st.success("Settings saved \u2713")
+                        st.rerun()  # m6: recompute TRIMP/zones immediately with new HR values
                 else:
                     st.session_state["_prefs"] = _prefs_to_save
-                    st.success("Settings saved locally \u2713")
+                    st.rerun()  # m6: recompute TRIMP/zones immediately with new HR values
 
         # Strava connection controls (shown when authenticated)
         if _OAUTH_ENABLED and "strava_tokens" in st.session_state:
@@ -279,20 +297,17 @@ def render_sidebar(
         "max_hr": int(max_hr),
         "rest_hr": int(rest_hr),
         "gender": str(gender),
+        "age": int(age),
         "race_choice": race_choice,
         "race_km": float(race_km),
         "race_km_label": race_km_label,
         "effort_band": effort_band,
         "long_run_ratio_thresh": float(long_run_ratio_thresh),
-        "readiness_window_days": int(readiness_window_days),
         "prediction_lookback_days": int(prediction_lookback_days),
         "hr_z1": float(hr_z1),
         "hr_z2": float(hr_z2),
         "hr_z3": float(hr_z3),
         "hr_z4": float(hr_z4),
-        "only_runs": bool(only_runs),
-        "exclude_manual": bool(exclude_manual),
-        "exclude_trainer": bool(exclude_trainer),
         "show_streams_tab": bool(show_streams_tab),
         # derived unit helpers
         "KM_TO_MILES": KM_TO_MILES,

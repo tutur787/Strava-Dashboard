@@ -142,7 +142,11 @@ def build_daily_weekly(
     hr_reserve = ((df["avg_hr"] - float(rest_hr)) / _hr_range).clip(lower=0.0, upper=1.0)
     if gender == "Women":
         _trimp = df["duration_min"] * hr_reserve * 0.86 * np.exp(1.67 * hr_reserve)
-    else:
+    elif gender in ("Non-binary", "Prefer not to say"):
+        # Averaged Banister coefficients across both sexes
+        # b = (0.64 + 0.86) / 2 = 0.75 ; e_coef = (1.92 + 1.67) / 2 = 1.795
+        _trimp = df["duration_min"] * hr_reserve * 0.75 * np.exp(1.795 * hr_reserve)
+    else:  # "Men" or unrecognised
         _trimp = df["duration_min"] * hr_reserve * 0.64 * np.exp(1.92 * hr_reserve)
     df["load_hr"] = _trimp.where(df["avg_hr"].notna(), 0.0)
 
@@ -328,7 +332,20 @@ def compute_fatigue_metrics_for_activity(activity_row: pd.Series, streams: Dict[
     if total_time <= 0:
         return None
 
-    half = total_time * 0.5
+    # Trim first 90 seconds to remove GPS lock / watch-start artifacts
+    _warmup_mask = t >= 90.0
+    if np.sum(_warmup_mask) > 60:  # only trim if enough samples remain
+        t = t[_warmup_mask]
+        d = d[_warmup_mask]
+        v = v[_warmup_mask]
+        pace_min_km = pace_min_km[_warmup_mask]
+        speed_mps = speed_mps[_warmup_mask]
+        if hr is not None:
+            hr = hr[_warmup_mask]
+        total_time = float(np.nanmax(t)) - float(np.nanmin(t))
+
+    _t_start = float(np.nanmin(t))
+    half = _t_start + total_time * 0.5
     first = t <= half
     second = t > half
 
@@ -496,6 +513,11 @@ def compute_compromised_runs(df_range: pd.DataFrame, max_hr: int) -> pd.DataFram
     """
     Label 'compromised' runs as those with unusually low efficiency at a given HR intensity.
     Proxy: speed_per_hr below rolling 20th percentile of last 12 HR-bearing runs.
+
+    C2 FIX: baseline is computed from easy-intensity runs only (Easy, Long Run, General).
+    Mixing tempo/race efforts into the baseline skews it upward, causing recovery runs
+    to appear 'compromised' simply because they are slower than a mixed baseline.
+    The detector now compares like-for-like: easy run vs. easy-run baseline.
     """
     d = df_range.copy()
     d = d[pd.notna(d["avg_hr"]) & pd.notna(d["avg_speed_mps"])].copy()
@@ -506,11 +528,27 @@ def compute_compromised_runs(df_range: pd.DataFrame, max_hr: int) -> pd.DataFram
     d["speed_per_hr"] = d["avg_speed_mps"] / d["avg_hr"]
     d = d.sort_values("start_dt_local").reset_index(drop=True)
 
-    # Rolling 20th percentile as baseline
+    # Build baseline from easy-intensity runs only so quality sessions don't
+    # inflate the reference, causing low false-positive flags on recovery days.
+    _easy_types = {"Easy", "Long Run", "General"}
+    _has_type = "run_type" in d.columns
+    _easy_mask = d["run_type"].isin(_easy_types) if _has_type else pd.Series(True, index=d.index)
+    _easy_runs = d[_easy_mask][["start_dt_local", "speed_per_hr"]].copy()
+
     def roll_q(x: pd.Series, q: float) -> pd.Series:
         return x.rolling(window=12, min_periods=6).quantile(q)
 
-    d["eff_q20"] = roll_q(d["speed_per_hr"], 0.20)
+    # Compute rolling 20th-percentile baseline on the easy subset, then merge back
+    _easy_runs = _easy_runs.sort_values("start_dt_local").reset_index(drop=True)
+    _easy_runs["eff_q20"] = roll_q(_easy_runs["speed_per_hr"], 0.20)
+
+    d = d.merge(
+        _easy_runs[["start_dt_local", "eff_q20"]],
+        on="start_dt_local", how="left",
+    )
+    # Forward-fill so non-easy runs get the most recent easy-run baseline
+    d["eff_q20"] = d["eff_q20"].ffill()
+
     d["compromised"] = (d["speed_per_hr"] < d["eff_q20"]).astype(int)
     d["eff_delta"] = d["speed_per_hr"] - d["eff_q20"]
 
@@ -520,6 +558,56 @@ def compute_compromised_runs(df_range: pd.DataFrame, max_hr: int) -> pd.DataFram
 # -----------------------------
 # Tab 5 computations (race prediction)
 # -----------------------------
+def calibrate_riegel_exponent(bests: dict) -> Optional[float]:
+    """
+    Fit the individual's personal Riegel fatigue exponent from their recorded efforts
+    at ≥2 standard distances using ordinary least-squares on the log-log relationship:
+
+        log(T2/T1) = exponent × log(D2/D1)
+
+    The population default of 1.06 is a cross-sectional average; better runners
+    typically cluster around 1.02–1.04 and recreational runners around 1.07–1.12.
+    A personal exponent calibrated from the athlete's own data is more accurate.
+
+    Returns None if fewer than 2 distances are available.
+    Clipped to [1.00, 1.20] to exclude physiologically implausible values.
+    """
+    from itertools import combinations as _comb
+    _dist_map = {
+        "best_5k":       5.0,
+        "best_10k":      10.0,
+        "best_hm":       21.0975,
+        "best_marathon": 42.195,
+    }
+    efforts: Dict[float, float] = {}
+    for key, dist_km in _dist_map.items():
+        if key in bests:
+            b = bests[key]
+            # Use median pace (more stable than single-best)
+            time_sec = b["pace_min_per_km"] * dist_km * 60.0
+            if time_sec > 0:
+                efforts[dist_km] = time_sec
+
+    if len(efforts) < 2:
+        return None
+
+    log_d, log_t = [], []
+    for d1, d2 in _comb(sorted(efforts.keys()), 2):
+        t1, t2 = efforts[d1], efforts[d2]
+        if t1 > 0 and t2 > 0:
+            log_d.append(float(np.log(d2 / d1)))
+            log_t.append(float(np.log(t2 / t1)))
+
+    if not log_d:
+        return None
+
+    ld = np.array(log_d)
+    lt = np.array(log_t)
+    # OLS through origin: exponent = Σ(ld·lt) / Σ(ld²)
+    exp_val = float(np.dot(ld, lt) / np.dot(ld, ld))
+    return round(float(np.clip(exp_val, 1.00, 1.20)), 3)
+
+
 def format_hms(seconds: float) -> str:
     if seconds is None or (isinstance(seconds, float) and np.isnan(seconds)):
         return "\u2014"
@@ -542,7 +630,7 @@ def predict_race_time_riegel(
     exponent: float = 1.06,
     min_km: float = 5.0,
     max_km: float = 1000.0,
-    max_ratio: float = 4.0,
+    max_ratio: float = 3.0,
     top_n: int = 5,
 ) -> Tuple[Optional[float], Optional[pd.Series]]:
     """
@@ -551,8 +639,9 @@ def predict_race_time_riegel(
 
     Professional-grade implementation:
     - min_km / max_km filter removes very short or unrealistically long runs.
-    - max_ratio cap: source distance must be ≥ target_km / max_ratio to limit
-      extrapolation error (e.g. no predicting a marathon from a 3 km run).
+    - max_ratio cap (default 3.0): source distance must be ≥ target_km / max_ratio.
+      Riegel's formula is most accurate within 3× extrapolation; beyond this,
+      glycogen dynamics and mechanical fatigue diverge significantly from the model.
     - Returns the *median of the top_n best* equivalent-time predictions rather
       than the raw minimum, which is too sensitive to a single exceptional day.
     - Source row returned is the single best individual run (for display).
@@ -644,32 +733,180 @@ def compute_efficiency_adjustment(
 # -----------------------------
 # Personal bests
 # -----------------------------
-def compute_personal_bests(activities: pd.DataFrame) -> dict:
+def _fastest_segment_in_stream(
+    dist_m: np.ndarray, time_s: np.ndarray, target_m: float
+) -> Optional[float]:
+    """
+    Two-pointer sliding window: find the minimum pace (min/km) to cover
+    `target_m` consecutive metres anywhere within a GPS stream.
+
+    This catches embedded PRs — e.g. a 5 K best hidden inside a 10 K race.
+    Requires 90 % of target distance to be present in the stream.
+    Pace is interpolated to exactly target_m so it is directly comparable
+    with whole-activity pace values.
+    """
+    n = len(dist_m)
+    total_dist = float(dist_m[-1]) - float(dist_m[0])
+    if n < 2 or total_dist < target_m * 0.9:
+        return None
+    best_pace: Optional[float] = None
+    j = 0
+    for i in range(n):
+        # Advance j until we've covered at least target_m from i
+        while j < n - 1 and (dist_m[j] - dist_m[i]) < target_m:
+            j += 1
+        covered = float(dist_m[j] - dist_m[i])
+        if covered < target_m * 0.9:
+            continue
+        elapsed_s = float(time_s[j] - time_s[i])
+        if elapsed_s <= 0:
+            continue
+        # Interpolate elapsed time to exactly target_m
+        elapsed_adj = elapsed_s * (target_m / covered)
+        pace = (elapsed_adj / 60.0) / (target_m / 1000.0)  # min/km
+        # Sanity guard: 1:45/km (world-record-ish) to 12:00/km (brisk walk)
+        if 1.75 < pace < 12.0:
+            if best_pace is None or pace < best_pace:
+                best_pace = pace
+    return best_pace
+
+
+def compute_personal_bests(
+    activities: pd.DataFrame,
+    streams_by_id: Optional[Dict[int, Any]] = None,
+    recent_days: Optional[int] = None,
+    top_n: int = 3,
+) -> dict:
+    """
+    Compute personal bests for standard race distances using the median of the
+    top-N fastest efforts per distance — more robust than a single best time.
+
+    Methodology
+    -----------
+    For each target distance:
+    1. Collect the best pace per unique activity from both whole-activity bands
+       and GPS-stream sliding-window search (catches embedded efforts, e.g. a
+       5 K best inside a 10 K race).
+    2. One pace per activity — the faster of the two methods — so the same run
+       can never inflate the sample.
+    3. Take the top-N by pace, compute the median.  If fewer than N efforts are
+       available, use what exists (graceful degradation).
+    4. Report n_efforts so the UI can label "median of 3 × 5K" vs "single 5K".
+
+    Parameters
+    ----------
+    activities    : full activity DataFrame
+    streams_by_id : per-second GPS streams (enables embedded-PR detection)
+    recent_days   : if set, only consider activities from the last N days
+    top_n         : number of top efforts to median (default 3)
+    """
     df = activities[pd.notna(activities["distance_km"]) & pd.notna(activities["pace_min_per_km"])].copy()
     df = df[df["duration_min"] > 3].copy()
+
+    if recent_days is not None:
+        _cutoff = pd.Timestamp.now(tz=None) - pd.Timedelta(days=recent_days)
+        _dt = pd.to_datetime(df["start_dt_local"]).dt.tz_localize(None)
+        df = df[_dt >= _cutoff].copy()
+
     bests: dict = {}
-    ranges = {
-        "best_5k":      (4.0,  7.0),
-        "best_10k":     (8.0,  12.0),
-        "best_hm":      (18.0, 23.0),
-        "best_marathon":(38.0, 44.0),
+
+    # Canonical distances and activity-level distance bands
+    # S4 FIX: tighter bands reduce contamination from runs that are clearly not
+    # race-distance efforts (e.g. a 6.8 km easy run polluting the 5K pool).
+    targets = {
+        "best_5k":       (5_000.0,  4.5,   5.5),
+        "best_10k":      (10_000.0, 9.0,  11.0),
+        "best_hm":       (21_097.5, 20.0, 22.5),
+        "best_marathon": (42_195.0, 40.0, 44.0),
     }
-    for key, (lo_km, hi_km) in ranges.items():
-        sub = df[(df["distance_km"] >= lo_km) & (df["distance_km"] <= hi_km)]
-        if len(sub) > 0:
-            idx = sub["pace_min_per_km"].idxmin()
-            r = sub.loc[idx]
-            bests[key] = {
-                "pace_min_per_km": float(r["pace_min_per_km"]),
-                "distance_km": float(r["distance_km"]),
-                "date": r["start_dt_local"],
-            }
+
+    # Build activity lookups for stream search
+    _id_to_date: Dict[int, Any] = {}
+    _id_to_dist: Dict[int, float] = {}
+    if "id" in df.columns and "start_dt_local" in df.columns:
+        for _, row in df.iterrows():
+            _id_to_date[int(row["id"])] = row["start_dt_local"]
+            _id_to_dist[int(row["id"])] = float(row.get("distance_km", 0))
+
+    # S6: when streams are loaded, skip the activity-level fallback so that
+    # warmup/cooldown kilometres don't deflate the pace estimate.
+    _streams_loaded = bool(streams_by_id)
+
+    for key, (target_m, lo_km, hi_km) in targets.items():
+        # ── Per-activity best pace pool ──────────────────────────────────
+        # {act_id: (pace_min_per_km, date, source)}
+        _pool: Dict[int, tuple] = {}
+
+        # 1. Activity-level: whole-run falls within distance band.
+        #    Skipped when GPS streams are available — the sliding-window search
+        #    (step 2) is more accurate because it strips warmup/cooldown km.
+        if not _streams_loaded:
+            sub = df[(df["distance_km"] >= lo_km) & (df["distance_km"] <= hi_km)]
+            for _, row in sub.iterrows():
+                act_id = int(row["id"])
+                pace   = float(row["pace_min_per_km"])
+                if act_id not in _pool or pace < _pool[act_id][0]:
+                    _pool[act_id] = (pace, row["start_dt_local"], "activity")
+
+        # 2. Stream-level: sliding-window search for fastest segment
+        if streams_by_id:
+            for act_id, streams in streams_by_id.items():
+                if act_id not in _id_to_date:
+                    continue
+                if _id_to_dist.get(act_id, 0) < (target_m / 1000.0) * 0.9:
+                    continue
+                if not isinstance(streams, dict):
+                    continue
+                dist_obj = streams.get("distance", {})
+                time_obj = streams.get("time", {})
+                if not (isinstance(dist_obj, dict) and isinstance(time_obj, dict)):
+                    continue
+                dist_data = dist_obj.get("data", [])
+                time_data = time_obj.get("data", [])
+                if len(dist_data) < 10 or len(time_data) < 10:
+                    continue
+                dist_arr = np.array(dist_data, dtype=float)
+                time_arr = np.array(time_data, dtype=float)
+                n = min(len(dist_arr), len(time_arr))
+                stream_pace = _fastest_segment_in_stream(
+                    dist_arr[:n], time_arr[:n], target_m
+                )
+                if stream_pace is None:
+                    continue
+                # Keep the faster of activity-level or stream-level for this run
+                if act_id not in _pool or stream_pace < _pool[act_id][0]:
+                    _pool[act_id] = (stream_pace, _id_to_date[act_id], "stream")
+
+        if not _pool:
+            continue
+
+        # ── Top-N median ─────────────────────────────────────────────────
+        sorted_efforts = sorted(_pool.values(), key=lambda x: x[0])[:top_n]
+        paces       = [e[0] for e in sorted_efforts]
+        median_pace = float(np.median(paces))
+        n_efforts   = len(paces)
+        # Date + source come from the single fastest effort (for display)
+        best_pace, best_date, best_source = sorted_efforts[0]
+        # All effort dates — shown in UI so user knows which runs were used (S3)
+        effort_dates = [e[1] for e in sorted_efforts]
+
+        bests[key] = {
+            "pace_min_per_km":      median_pace,   # median — used for VDOT
+            "pace_min_per_km_best": best_pace,      # outright fastest — for display
+            "distance_km":          target_m / 1000.0,
+            "date":                 best_date,
+            "source":               best_source,
+            "n_efforts":            n_efforts,
+            "effort_dates":         effort_dates,  # S3: dates of all top-N efforts used
+        }
+
+    # ── Longest run ──────────────────────────────────────────────────────
     if len(df) > 0:
         idx = df["distance_km"].idxmax()
         r = df.loc[idx]
         bests["longest_run"] = {
             "distance_km": float(r["distance_km"]),
-            "date": r["start_dt_local"],
+            "date":        r["start_dt_local"],
         }
     return bests
 
@@ -818,8 +1055,12 @@ def compute_activity_gap(streams: dict) -> Optional[float]:
 # VO2max estimate (Jack Daniels VDOT)
 # -----------------------------
 def estimate_vo2max(bests: dict) -> Optional[float]:
-    """Estimate VDOT from best recorded efforts using Jack Daniels' formula."""
-    priority = [("best_marathon", 42.195), ("best_hm", 21.0975), ("best_10k", 10.0), ("best_5k", 5.0)]
+    """Estimate VDOT from best recorded efforts using Jack Daniels' formula.
+    Priority: 5K > 10K > Half Marathon > Marathon.
+    For recreational athletes, shorter-distance efforts better reflect aerobic ceiling
+    without contamination from glycogen depletion or pacing errors (common at marathon).
+    """
+    priority = [("best_5k", 5.0), ("best_10k", 10.0), ("best_hm", 21.0975), ("best_marathon", 42.195)]
     for key, dist_km in priority:
         if key not in bests:
             continue
@@ -833,6 +1074,135 @@ def estimate_vo2max(bests: dict) -> Optional[float]:
         if np.isfinite(vdot) and vdot > 10:
             return round(float(vdot), 1)
     return None
+
+
+def estimate_vo2max_range(bests: dict) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Compute VDOT from ALL qualifying distances (5K, 10K, HM, Marathon) and return
+    (vdot_low, vdot_high) as the range across those estimates.
+    Returns (None, None) when fewer than 2 distances are available — single-effort
+    estimates carry no meaningful inter-distance spread to report.
+    """
+    priority = [("best_marathon", 42.195), ("best_hm", 21.0975), ("best_10k", 10.0), ("best_5k", 5.0)]
+    vdots = []
+    for key, dist_km in priority:
+        if key not in bests:
+            continue
+        b = bests[key]
+        time_sec = b["pace_min_per_km"] * dist_km * 60.0
+        time_min = time_sec / 60.0
+        v = (dist_km * 1000.0) / time_min
+        vo2 = -4.60 + 0.182258 * v + 0.000104 * v ** 2
+        pct = 0.8 + 0.1894393 * np.exp(-0.012778 * time_min) + 0.2989558 * np.exp(-0.1932605 * time_min)
+        vdot = vo2 / pct
+        if np.isfinite(vdot) and vdot > 10:
+            vdots.append(round(float(vdot), 1))
+    if len(vdots) < 2:
+        return None, None
+    return round(min(vdots), 1), round(max(vdots), 1)
+
+
+# -----------------------------
+# Submaximal HR-based VO2max
+# -----------------------------
+def estimate_vo2max_submaximal(
+    activities: pd.DataFrame,
+    max_hr: int,
+    rest_hr: int,
+    recent_days: int = 90,
+) -> dict:
+    """
+    Estimate VO2max from submaximal steady-state training runs — no race required.
+
+    Method
+    ------
+    For each qualifying aerobic run:
+
+        v (m/min)   = distance_m / duration_min
+        VO2_run     = 0.2 × v + 3.5          (ACSM flat-ground running O2 cost)
+        HRr         = (avg_hr − rest_hr) / (max_hr − rest_hr)   (Karvonen reserve)
+        VO2max_i    = VO2_run / HRr           (since VO2 ≈ HRr × VO2max at steady state)
+
+    The median of all per-run estimates is returned as the point estimate.
+    The 25th–75th percentile forms the confidence interval.
+
+    Qualifying criteria (steady-state aerobic filter)
+    --------------------------------------------------
+    • avg_hr present
+    • HRr in [0.50, 0.90]  — above easy jog, below near-maximal
+      (lower bound raised from 0.40 → 0.50: Swain et al. (1994) only validated
+       the linear %HRR↔%VO2max relationship above ~50% HRmax; below this the
+       relationship breaks down and estimates skew artificially high)
+    • duration ≥ 20 min and distance ≥ 3 km  — steady-state assumption
+    • VO2max_i in [20, 90]  — physiological sanity
+
+    Sources
+    -------
+    • ACSM's Guidelines for Exercise Testing and Prescription, 11th ed.
+    • Swain DP et al. (1994). Target HRs for the development of cardiorespiratory
+      fitness. Medicine & Science in Sports & Exercise, 26(1), 112–116.
+    • Karvonen MJ et al. (1957). The effects of training on heart rate.
+      Annales Medicinae Experimentalis et Biologiae Fenniae, 35(3), 307–315.
+
+    Returns dict with keys:
+        vo2max        — median estimate (ml/kg/min), or None if insufficient data
+        vo2max_low    — 25th percentile
+        vo2max_high   — 75th percentile
+        n_runs        — number of qualifying runs used
+        method        — "submaximal_hr"
+    """
+    result: dict = {
+        "vo2max": None, "vo2max_low": None, "vo2max_high": None,
+        "n_runs": 0, "method": "submaximal_hr",
+    }
+
+    df = activities.copy()
+
+    # Date filter
+    _cutoff = pd.Timestamp.now(tz=None) - pd.Timedelta(days=recent_days)
+    _dt = pd.to_datetime(df["start_dt_local"]).dt.tz_localize(None)
+    df = df[_dt >= _cutoff].copy()
+
+    # Require HR, duration, distance
+    df = df[pd.notna(df["avg_hr"]) & (df["avg_hr"] > 0)].copy()
+    df = df[df["duration_min"] >= 20].copy()
+    df = df[df["distance_km"] >= 3.0].copy()
+
+    if df.empty:
+        return result
+
+    # HR reserve fraction (Karvonen)
+    _hr_range = max(float(max_hr) - float(rest_hr), 1.0)
+    df["HRr"] = ((df["avg_hr"] - float(rest_hr)) / _hr_range).clip(0.0, 1.0)
+
+    # Steady-state aerobic zone only
+    df = df[(df["HRr"] >= 0.50) & (df["HRr"] <= 0.90)].copy()  # C4: raised from 0.40 per Swain et al. (1994)
+
+    if df.empty:
+        return result
+
+    # Speed and ACSM VO2
+    df["speed_m_per_min"] = df["distance_km"] * 1000.0 / df["duration_min"]
+    df["vo2_run"] = 0.2 * df["speed_m_per_min"] + 3.5
+
+    # Per-run VO2max estimate
+    df["vo2max_i"] = df["vo2_run"] / df["HRr"]
+
+    # Physiological sanity filter
+    df = df[(df["vo2max_i"] >= 20) & (df["vo2max_i"] <= 90)].copy()
+
+    if df.empty:
+        return result
+
+    vals = df["vo2max_i"].values
+    result.update({
+        "vo2max":      round(float(np.median(vals)), 1),
+        "vo2max_low":  round(float(np.percentile(vals, 25)), 1),
+        "vo2max_high": round(float(np.percentile(vals, 75)), 1),
+        "n_runs":      int(len(vals)),
+        "method":      "submaximal_hr",
+    })
+    return result
 
 
 # -----------------------------
@@ -886,10 +1256,11 @@ def build_calendar_heatmap(activities: pd.DataFrame, n_weeks: int = 53, use_mile
         acts["type_priority"] = acts["run_type"].map(RUN_TYPE_PRIORITY).fillna(0)
         dominant = acts.loc[acts.groupby("date")["type_priority"].idxmax(), ["date", "run_type"]].set_index("date")["run_type"]
 
-    daily = acts.groupby("date").agg(
-        distance_km=("distance_km", "sum"),
-        n_runs=("id", "count"),
-    ).reset_index()
+    _has_load = "load_hr" in acts.columns
+    _agg_dict = {"distance_km": ("distance_km", "sum"), "n_runs": ("id", "count")}
+    if _has_load:
+        _agg_dict["load_hr"] = ("load_hr", "sum")
+    daily = acts.groupby("date").agg(**_agg_dict).reset_index()
 
     end_date = pd.Timestamp.today().normalize()
     start_date = end_date - pd.Timedelta(weeks=n_weeks)
@@ -907,31 +1278,55 @@ def build_calendar_heatmap(activities: pd.DataFrame, n_weeks: int = 53, use_mile
         if r["distance_km"] > 0:
             tag = f" \u00b7 {r['run_type']}" if has_type and r["run_type"] != "rest" else ""
             dist_str = _dist_fmt(r["distance_km"], use_miles)
-            return f"{d_str}<br>{dist_str} \u00b7 {int(r['n_runs'])} run{'s' if r['n_runs'] != 1 else ''}{tag}"
+            _load_str = f"\nLoad: {r['load_hr']:.0f} TRIMP" if _has_load and pd.notna(r.get("load_hr")) and r.get("load_hr", 0) > 0 else ""
+            return f"{d_str}<br>{dist_str} \u00b7 {int(r['n_runs'])} run{'s' if r['n_runs'] != 1 else ''}{tag}{_load_str}"
         return f"{d_str}<br>Rest"
 
     cal["hover"] = cal.apply(_hover, axis=1)
 
-    # Color: type-based when run, dark background when rest
+    # Color: type-based hue, brightness scaled by TRIMP load within each type band.
+    # z = type_num (integer) + load_fraction (0..0.99): higher load = more saturated colour.
     _type_to_num = {"rest": 0, "General": 1, "Easy": 2, "Long Run": 3, "Tempo": 4, "Workout": 5, "Race": 6}
-    if has_type:
-        cal["z_val"] = cal["run_type"].map(_type_to_num).fillna(0)
+
+    # Load fraction (0 = low load, 0.99 = peak load within the selected window)
+    if _has_load:
+        if "load_hr" not in cal.columns:
+            cal["load_hr"] = 0.0
+        cal["load_hr"] = cal["load_hr"].fillna(0)
+        _p95 = cal["load_hr"].quantile(0.95)
+        if _p95 > 0:
+            cal["load_frac"] = (cal["load_hr"] / _p95).clip(0.15, 0.99)
+        else:
+            cal["load_frac"] = 0.6
     else:
-        cal["z_val"] = cal["distance_km"].clip(upper=30)
+        cal["load_frac"] = 0.7  # fixed brightness when no load data
+
+    # Fractional part only applies on active days; rest days stay at 0
+    cal["load_frac"] = cal["load_frac"].where(cal["distance_km"] > 0, 0.0)
+
+    if has_type:
+        cal["z_val"] = cal["run_type"].map(_type_to_num).fillna(0) + cal["load_frac"]
+    else:
+        # Fallback: pure distance-based brightness (no type colours)
+        _max_d = cal["distance_km"].quantile(0.95)
+        cal["z_val"] = (cal["distance_km"] / max(_max_d, 1)).clip(0, 6)
 
     z    = cal.pivot(index="dow", columns="week_col", values="z_val").values
     text = cal.pivot(index="dow", columns="week_col", values="hover").values
 
-    # Discrete colorscale: 0=rest, 1=General, 2=Easy, 3=Long Run, 4=Tempo, 5=Workout, 6=Race
-    # zmin=0, zmax=6 -> z=i maps to i/6 in [0,1]. Build hard step transitions.
-    colors = ["#111111", "#aec7e8", "#6baed6", "#2ca02c", "#fd8d3c", "#d62728", "#9467bd"]
-    n = len(colors)  # 7 values spanning z=0..6
-    discrete_cs = [[0.0, colors[0]]]
-    for i in range(1, n):
-        t = i / (n - 1)
-        discrete_cs.append([t - 1e-9, colors[i - 1]])  # hold previous colour right up to boundary
-        discrete_cs.append([t, colors[i]])               # snap to new colour
-    discrete_cs.append([1.0, colors[-1]])
+    # Continuous-within-band colorscale: each type band fades from dim → saturated.
+    # zmax = 6.99 so each integer band spans exactly 1.0 unit.
+    # Base (saturated) and dim (low load) colours per type:
+    base_colors = ["#111111", "#aec7e8", "#6baed6", "#2ca02c", "#fd8d3c", "#d62728", "#9467bd"]
+    dim_colors  = ["#111111", "#1e2c3a", "#0d2230", "#082b08", "#3b2000", "#2d0707", "#1a0d2e"]
+    zmax = 6.99
+    discrete_cs = [[0.0, base_colors[0]], [0.99 / zmax, base_colors[0]]]  # rest band: always dark
+    for i in range(1, 7):
+        z_lo = (i + 0.0) / zmax
+        z_hi = (i + 0.99) / zmax
+        discrete_cs.append([z_lo,  dim_colors[i]])
+        discrete_cs.append([z_hi,  base_colors[i]])
+    discrete_cs.append([1.0, base_colors[-1]])
 
     week_starts = cal.groupby("week_col")["date"].min().sort_index()
     x_labels, prev_month = [], None
@@ -946,7 +1341,7 @@ def build_calendar_heatmap(activities: pd.DataFrame, n_weeks: int = 53, use_mile
         z=z, text=text,
         hovertemplate="%{text}<extra></extra>",
         colorscale=discrete_cs,
-        zmin=0, zmax=6,
+        zmin=0, zmax=zmax,
         showscale=False, xgap=3, ygap=3,
     ))
     fig.update_layout(
@@ -1055,6 +1450,82 @@ def compute_risk_penalty(daily: pd.DataFrame) -> float:
     if rs <= 55:
         return 1.0
     return float(1.0 + min(0.06, (rs - 55.0) / 45.0 * 0.06))
+
+
+# -----------------------------
+# PMC forward projection
+# -----------------------------
+def forward_project_pmc(
+    daily: pd.DataFrame,
+    race_date: pd.Timestamp,
+    taper_weeks: int,
+    pre_taper_daily_load: float,
+    load_build_pct: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Project CTL / ATL / TSB forward to race_date under assumed training + taper.
+
+    Parameters
+    ----------
+    daily               : historical daily aggregates — seeds the initial CTL and ATL.
+    race_date           : target race date.
+    taper_weeks         : weeks of taper immediately before race_date.
+    pre_taper_daily_load: assumed average daily TRIMP load during the build phase.
+    load_build_pct      : weekly % increase during the build phase (0 = maintain,
+                          5 = +5 %/week, etc.). Capped at 1.5× to stay conservative.
+
+    Returns a DataFrame with columns: date, ctl, atl, tsb, acwr, daily_load.
+    Returns an empty DataFrame if race_date is not in the future or daily is empty.
+
+    Science note — EWMA time constants match Banister (1975):
+        CTL alpha = 2 / (28 + 1) ≈ 0.069  (28-day fitness)
+        ATL alpha = 2 / (7 + 1)  = 0.25   (7-day fatigue)
+    Taper modelled as exponential volume reduction: load × 0.6^(taper_week + 1),
+    which yields ≈40 % reduction per week — consistent with Bosquet et al. (2007).
+    """
+    if len(daily) == 0:
+        return pd.DataFrame()
+
+    last = daily.sort_values("date_ts").iloc[-1]
+    ctl = float(last.get("chronic_load", 0) or 0)
+    atl = float(last.get("acute_load", 0) or 0)
+
+    today = pd.Timestamp.now().normalize()
+    race_date = pd.Timestamp(race_date).normalize()
+    if race_date <= today:
+        return pd.DataFrame()
+
+    alpha_ctl = 2.0 / (28.0 + 1.0)
+    alpha_atl = 2.0 / (7.0 + 1.0)
+    taper_start = race_date - pd.Timedelta(weeks=int(taper_weeks))
+
+    rows = []
+    current = today + pd.Timedelta(days=1)
+    while current <= race_date:
+        week_num = (current - today).days // 7
+        if current >= taper_start:
+            taper_week = (current - taper_start).days // 7
+            daily_load = pre_taper_daily_load * (0.6 ** (taper_week + 1))
+        else:
+            build_factor = min(1.5, (1.0 + load_build_pct / 100.0) ** week_num)
+            daily_load = pre_taper_daily_load * build_factor
+
+        ctl = ctl * (1.0 - alpha_ctl) + daily_load * alpha_ctl
+        atl = atl * (1.0 - alpha_atl) + daily_load * alpha_atl
+        tsb = ctl - atl
+        acwr = atl / ctl if ctl > 1e-6 else np.nan
+
+        rows.append({
+            "date": current,
+            "ctl": round(ctl, 2),
+            "atl": round(atl, 2),
+            "tsb": round(tsb, 2),
+            "acwr": round(float(acwr), 3) if np.isfinite(acwr) else np.nan,
+            "daily_load": round(daily_load, 2),
+        })
+        current += pd.Timedelta(days=1)
+
+    return pd.DataFrame(rows)
 
 
 # -----------------------------

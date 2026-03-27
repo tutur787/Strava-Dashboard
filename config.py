@@ -73,8 +73,8 @@ KM_TO_MILES = 0.621371
 _DEFAULT_HR_ZONES = [
     ("Z1 Recovery",  0.00, 0.60),
     ("Z2 Aerobic",   0.60, 0.75),
-    ("Z3 Tempo",     0.75, 0.87),
-    ("Z4 Threshold", 0.87, 0.93),
+    ("Z3 Marathon / Aerobic Threshold", 0.75, 0.87),
+    ("Z4 Lactate Threshold / Tempo",    0.87, 0.93),
     ("Z5 VO\u2082max",   0.93, 9.99),
 ]
 
