@@ -571,19 +571,29 @@ def render(data: dict, settings: dict) -> None:
     if vo2max_est is not None or _sm_val is not None:
         st.divider()
 
-    # Jack Daniels training paces derived from VDOT
+    # Jack Daniels training paces — pace-based VDOT only (HR estimate intentionally excluded)
+    # Daniels' zones were calibrated from race performances; using an HR-derived number
+    # would prescribe paces faster than the athlete can sustain in a race.
     st.subheader("Jack Daniels training paces")
-    _src_label = vo2max_source or "best recorded effort"
-    st.caption(
-        f"Prescribed training paces calculated from your VDOT of **{vo2max_est:.1f}** "
-        f"(derived from your {_src_label}). "
-        "Each zone targets a specific physiological adaptation. "
-        "Source: *Daniels' Running Formula* (2005)."
-    )
-    _pace_rows = estimate_training_paces(vo2max_est, use_miles=use_miles)
-    _pace_df = pd.DataFrame(_pace_rows)
-    st.dataframe(_pace_df, hide_index=True, use_container_width=True)
-    st.caption(
-        "\u2139\ufe0f These are effort-based target paces, not GPS-enforced zones. "
-        "Easy pace is intentionally slow \u2014 most runners train their easy runs too fast."
-    )
+    if vo2max_est is not None:
+        _src_label = vo2max_source or "best recorded effort"
+        st.caption(
+            f"Prescribed training paces calculated from your pace-based VDOT of **{vo2max_est:.1f}** "
+            f"(derived from your {_src_label}). "
+            "Each zone targets a specific physiological adaptation. "
+            "Source: *Daniels' Running Formula* (2005)."
+        )
+        _pace_rows = estimate_training_paces(vo2max_est, use_miles=use_miles)
+        _pace_df = pd.DataFrame(_pace_rows)
+        st.dataframe(_pace_df, hide_index=True, use_container_width=True)
+        st.caption(
+            "\u2139\ufe0f These are effort-based target paces, not GPS-enforced zones. "
+            "Easy pace is intentionally slow \u2014 most runners train their easy runs too fast."
+        )
+    else:
+        st.info(
+            "\U0001f3c3 Training paces require a pace-based VDOT estimate. "
+            "Run a recent 5K\u2013marathon effort (or time trial) and refresh — "
+            "paces are derived from race performance, not the HR-based estimate, "
+            "to ensure they match what you can actually sustain on race day."
+        )
