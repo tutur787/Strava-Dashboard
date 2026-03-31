@@ -274,7 +274,7 @@ if "strava_tokens" not in st.session_state:
 
         st.markdown("<div style='margin-top:1.8rem'></div>", unsafe_allow_html=True)
         st.markdown(
-            f"""<a href="{_auth_url}" target="_self" style="
+            f"""<a href="{_auth_url}" target="_top" style="
                 display:inline-block;
                 background-color:#FC4C02;
                 color:#ffffff;
