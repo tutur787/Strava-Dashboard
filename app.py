@@ -241,8 +241,7 @@ _hr_zones        = settings["_hr_zones"]
 if "strava_tokens" not in st.session_state:
     if _OAUTH_ENABLED:
         _auth_url = get_strava_auth_url(_STRAVA_CLIENT_ID, _REDIRECT_URI)
-        with st.expander("🔧 Debug: OAuth config (remove before launch)", expanded=False):
-            st.code(f"client_id    : {_STRAVA_CLIENT_ID}\nredirect_uri : {_REDIRECT_URI}\nauth_url     : {_auth_url}")
+
         st.markdown(
             """
             <p style="font-size:1.05rem;color:rgba(255,255,255,0.75);margin-top:0;margin-bottom:1.8rem;">

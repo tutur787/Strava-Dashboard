@@ -210,10 +210,15 @@ def render_sidebar(
                         st.error(f"Save failed: {_pref_err}")
                     else:
                         st.session_state["_prefs"] = _prefs_to_save
-                        st.rerun()  # m6: recompute TRIMP/zones immediately with new HR values
+                        st.session_state["_settings_saved"] = True
+                        st.rerun()
                 else:
                     st.session_state["_prefs"] = _prefs_to_save
-                    st.rerun()  # m6: recompute TRIMP/zones immediately with new HR values
+                    st.session_state["_settings_saved"] = True
+                    st.rerun()
+
+            if st.session_state.pop("_settings_saved", False):
+                st.success("Settings saved")
 
         # Strava connection controls (shown when authenticated)
         if _OAUTH_ENABLED and "strava_tokens" in st.session_state:
