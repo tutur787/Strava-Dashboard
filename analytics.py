@@ -70,9 +70,27 @@ def classify_run(
 
         if len(v_data) > 60:
             v = np.array(v_data, dtype=float)
-            v = v[np.isfinite(v) & (v > 0.5)]
-            if len(v) > 60 and np.mean(v) > 1e-6:
-                cv = float(np.std(v) / np.mean(v))
+
+            # If grade_smooth is available, compute CV on GAP-adjusted velocity so
+            # that hilly terrain doesn't inflate variability and falsely flag long
+            # runs as Workouts. GAP velocity = v × (C_grade / C_flat) using the
+            # Minetti (2002) metabolic cost polynomial.
+            g_obj  = streams.get("grade_smooth", {})
+            g_data = g_obj.get("data", []) if isinstance(g_obj, dict) else []
+            if len(g_data) >= len(v_data):
+                g = np.array(g_data[:len(v_data)], dtype=float) / 100.0  # % → fraction
+                c_g    = 280.5*g**5 - 58.7*g**4 - 76.8*g**3 + 51.9*g**2 + 19.6*g + 2.5
+                c_flat = 2.5
+                # gap_factor > 1 on uphills (effort > flat), < 1 on downhills
+                gap_factor = np.where(c_g > 0.5, c_g / c_flat, np.nan)
+                v_gap = v * gap_factor  # GAP-equivalent velocity (m/s)
+                valid = np.isfinite(v_gap) & (v_gap > 0.5)
+                v_for_cv = v_gap[valid]
+            else:
+                v_for_cv = v[np.isfinite(v) & (v > 0.5)]
+
+            if len(v_for_cv) > 60 and np.mean(v_for_cv) > 1e-6:
+                cv = float(np.std(v_for_cv) / np.mean(v_for_cv))
                 if cv > 0.28:
                     return "Workout"
 
