@@ -77,13 +77,15 @@ def classify_run(
             # Minetti (2002) metabolic cost polynomial.
             g_obj  = streams.get("grade_smooth", {})
             g_data = g_obj.get("data", []) if isinstance(g_obj, dict) else []
-            if len(g_data) >= len(v_data):
-                g = np.array(g_data[:len(v_data)], dtype=float) / 100.0  # % → fraction
+            if len(g_data) > 0:
+                n = min(len(v_data), len(g_data))
+                v_s = v[:n]
+                g = np.clip(np.array(g_data[:n], dtype=float) / 100.0, -0.40, 0.40)  # % → fraction, clipped
                 c_g    = 280.5*g**5 - 58.7*g**4 - 76.8*g**3 + 51.9*g**2 + 19.6*g + 2.5
                 c_flat = 2.5
                 # gap_factor > 1 on uphills (effort > flat), < 1 on downhills
                 gap_factor = np.where(c_g > 0.5, c_g / c_flat, np.nan)
-                v_gap = v * gap_factor  # GAP-equivalent velocity (m/s)
+                v_gap = v_s * gap_factor  # GAP-equivalent velocity (m/s)
                 valid = np.isfinite(v_gap) & (v_gap > 0.5)
                 v_for_cv = v_gap[valid]
             else:
