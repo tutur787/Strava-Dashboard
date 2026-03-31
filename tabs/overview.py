@@ -139,10 +139,9 @@ def render(data: dict, settings: dict) -> None:
         help="Average distance per calendar week across the selected range.",
     )
     o4.metric(
-        "Consistent weeks",
-        f"{_pct_3plus:.0f}%",
-        f"{_n_weeks} weeks",
-        help="Percentage of weeks in the selected range with \u22653 runs.",
+        "Week streak",
+        f"{consistency['week_streak']} wks",
+        help="Consecutive weeks with at least one run. All-time — not affected by the date filter.",
     )
     o6.metric(
         "Elevation gain",
