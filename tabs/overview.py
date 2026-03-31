@@ -103,24 +103,51 @@ def render(data: dict, settings: dict) -> None:
     streams_by_id = data["streams_by_id"]
     bests = data["bests"]
 
-    # ── All-time KPIs ────────────────────────────────────────────────
+    # ── KPIs for selected date range ─────────────────────────────────
     o1, o2, o3, o4, o5, o6 = st.columns(6)
-    o1.metric("Total runs", f"{consistency['total_runs']:,}")
-    o2.metric("Total distance", _dist_fmt(consistency['total_km'], use_miles, decimals=0))
-    o3.metric("Week streak", f"{consistency['week_streak']} wks",
-              help="Consecutive weeks with at least one run.")
-    o4.metric("Consistent weeks (last 12)", f"{consistency['pct_consistent_weeks']:.0f}%",
-              help="Weeks with \u22653 runs in the last 12 weeks.")
-    # Total elevation gain in selected period
+
+    _n_runs   = len(df_range)
+    _total_km = float(df_range["distance_km"].sum()) if _n_runs > 0 else 0.0
     _total_elev = (
         df_range["total_elevation_gain"].fillna(0).sum()
         if "total_elevation_gain" in df_range.columns else 0
     )
+    # Avg weekly distance over the selected window
+    _range_days = data.get("date_range")
+    if _range_days and _n_runs > 0:
+        _span_weeks = max(1, (pd.Timestamp(_range_days[1]) - pd.Timestamp(_range_days[0])).days / 7)
+        _avg_wk_km = _total_km / _span_weeks
+    else:
+        _avg_wk_km = None
+
+    # Consistent weeks: weeks with ≥3 runs within selected range
+    if _n_runs > 0:
+        _rng_wks = df_range.copy()
+        _rng_wks["_week"] = pd.to_datetime(_rng_wks["start_dt_local"]).dt.to_period("W")
+        _wk_counts = _rng_wks.groupby("_week").size()
+        _pct_3plus = float((_wk_counts >= 3).mean() * 100) if len(_wk_counts) > 0 else 0.0
+        _n_weeks   = len(_wk_counts)
+    else:
+        _pct_3plus = 0.0
+        _n_weeks   = 0
+
+    o1.metric("Runs", f"{_n_runs:,}", help="Total runs in the selected date range.")
+    o2.metric("Distance", _dist_fmt(_total_km, use_miles, decimals=0), help="Total distance in the selected date range.")
+    o3.metric(
+        "Avg weekly distance",
+        _dist_fmt(_avg_wk_km, use_miles, decimals=1) if _avg_wk_km is not None else "\u2014",
+        help="Average distance per calendar week across the selected range.",
+    )
+    o4.metric(
+        "Consistent weeks",
+        f"{_pct_3plus:.0f}%",
+        f"{_n_weeks} weeks",
+        help="Percentage of weeks in the selected range with \u22653 runs.",
+    )
     o6.metric(
         "Elevation gain",
         f"{int(_total_elev):,} m" if _total_elev > 0 else "\u2014",
-        help="Total ascent in the selected date range. High-elevation running elevates HR at any given pace \u2014 "
-             "factor this in when comparing paces across hilly and flat routes.",
+        help="Total ascent in the selected date range.",
     )
     # KPI card: show the higher of pace-based VDOT and HR-based estimate
     _kpi_candidates = {k: v for k, v in {"pace": vo2max_est, "hr": _sm_val_early}.items() if v is not None}

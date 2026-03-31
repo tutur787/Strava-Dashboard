@@ -3,7 +3,7 @@ tabs/race_predictor.py — Race Predictor tab render function.
 """
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
+import plotly.graph_objects as go  # used for source runs bar chart
 import streamlit as st
 
 from analytics import (
@@ -304,57 +304,3 @@ def render(data: dict, settings: dict) -> None:
 
     st.divider()
 
-    # ── Pacing strategy ──────────────────────────────────────────
-    st.subheader("Pacing strategy")
-    st.caption(
-        f"Target splits for your predicted {format_hms(pred_sec)} at {race_km:.2f} km. "
-        "Negative split = start conservatively and finish strong."
-    )
-
-    # Build splits in km internally, convert display values to miles if needed
-    n_km = int(np.ceil(float(race_km)))
-    km_marks = list(range(1, n_km + 1))
-    _split_dist_factor = KM_TO_MILES if use_miles else 1.0
-    _split_pace_factor = (1.0 / KM_TO_MILES) if use_miles else 1.0
-    split_marks_disp = [round(k * _split_dist_factor, 2) for k in km_marks]
-    _pace_lbl = f"Pace ({_p_unit(use_miles)})"
-
-    even_pace     = pace_min  # in min/km always
-    neg_first     = even_pace * 1.025
-    neg_second    = even_pace * 0.975
-    prog_paces    = [neg_first if k <= race_km / 2 else neg_second for k in km_marks]
-    even_paces    = [even_pace] * n_km
-    even_paces_d  = [p * _split_pace_factor for p in even_paces]
-    prog_paces_d  = [p * _split_pace_factor for p in prog_paces]
-
-    def fmt_p(p_disp):
-        m = int(p_disp); s = int(round((p_disp - m) * 60))
-        return f"{m}:{s:02d}"
-
-    splits_df = pd.DataFrame({
-        _d_unit(use_miles): split_marks_disp,
-        f"Even ({_p_unit(use_miles)})": [fmt_p(p) for p in even_paces_d],
-        f"Negative ({_p_unit(use_miles)})": [fmt_p(p) for p in prog_paces_d],
-    })
-
-    fig_splits = go.Figure()
-    fig_splits.add_trace(go.Bar(
-        x=split_marks_disp, y=even_paces_d, name="Even split",
-        marker_color="rgba(107,174,214,0.7)", text=[fmt_p(p) for p in even_paces_d],
-        textposition="outside",
-    ))
-    fig_splits.add_trace(go.Bar(
-        x=split_marks_disp, y=prog_paces_d, name="Negative split",
-        marker_color="rgba(82,232,138,0.7)", text=[fmt_p(p) for p in prog_paces_d],
-        textposition="outside",
-    ))
-    fig_splits.update_yaxes(autorange="reversed", title=_pace_lbl)
-    fig_splits.update_layout(
-        height=360, barmode="group", xaxis_title=_d_unit(use_miles),
-        margin=dict(l=10, r=10, t=20, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    )
-    st.plotly_chart(fig_splits, use_container_width=True)
-
-    with st.expander("Show full split table"):
-        st.dataframe(splits_df, hide_index=True, use_container_width=True)
