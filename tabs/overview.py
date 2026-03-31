@@ -104,6 +104,7 @@ def render(data: dict, settings: dict) -> None:
     bests = data["bests"]
 
     # ── KPIs for selected date range ─────────────────────────────────
+    st.caption("**Selected range**")
     o1, o2, o3, o4, o5, o6 = st.columns(6)
 
     _n_runs   = len(df_range)
@@ -213,7 +214,7 @@ def render(data: dict, settings: dict) -> None:
     _badges = [
         _qual_badge("Heart Rate", _n_hr, _n_total, "Needed for training load, zones & classification"),
         _qual_badge("Streams / GPS", _n_strm, _n_total, "Needed for cadence, GAP & HR zone detail"),
-        _qual_badge("GPS Location", _n_gps, _n_total, "Needed for route maps & weather overlay"),
+        _qual_badge("GPS Location", _n_gps, _n_total, "Needed for route maps"),
         _qual_badge("Elevation", _n_elev, _n_total, "Needed for grade-adjusted pace (GAP)"),
     ]
     st.markdown(

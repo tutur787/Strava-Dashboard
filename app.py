@@ -88,7 +88,6 @@ from data_loader import (
     load_streams,
     load_strava_disk_cache,
     save_strava_disk_cache,
-    fetch_weather_for_activities,
 )
 from ui.styles import inject_css
 from ui.sidebar import render_sidebar
@@ -513,30 +512,6 @@ if len(activities) > 0:
             easy_thresh=_easy_thresh, tempo_thresh=_tempo_thresh,
         )
 
-# ── Weather enrichment ────────────────────────────────────────────────
-_weather_df = pd.DataFrame()
-if len(df_range) > 0:
-    try:
-        _weather_cols  = ["id", "date", "start_lat", "start_lng", "start_dt_local"]
-        _weather_input_df = df_range[
-            [c for c in _weather_cols if c in df_range.columns]
-        ].copy()
-        # Serialize timestamps as ISO strings, NOT epoch milliseconds (pandas default),
-        # so the weather function can parse "2024-03-15T10" correctly.
-        if "start_dt_local" in _weather_input_df.columns:
-            _weather_input_df["start_dt_local"] = pd.to_datetime(
-                _weather_input_df["start_dt_local"]
-            ).dt.strftime("%Y-%m-%dT%H:%M:%S")
-        if "date" in _weather_input_df.columns:
-            _weather_input_df["date"] = _weather_input_df["date"].astype(str)
-        _weather_input = _weather_input_df.to_json(orient="records")
-        _weather_df = fetch_weather_for_activities(_weather_input)
-    except Exception:
-        _weather_df = pd.DataFrame()
-
-# Merge temp_c into df_range so tabs can access it directly via df_range["temp_c"]
-if len(_weather_df) > 0 and "id" in _weather_df.columns and len(df_range) > 0:
-    df_range = df_range.merge(_weather_df[["id", "temp_c"]], on="id", how="left")
 
 # ── Daily/weekly aggregates for full history ──────────────────────────
 daily_all  = pd.DataFrame()
@@ -703,8 +678,7 @@ data: dict = {
     "athlete_id":    int(_athlete_id) if _athlete_id else None,
     "consistency":   consistency,
     "cadence_df":    cadence_df,
-    "_weather_df":   _weather_df,
-    "_hr_zones":     _hr_zones,
+"_hr_zones":     _hr_zones,
     "gear_details":  gear_details,
 }
 
