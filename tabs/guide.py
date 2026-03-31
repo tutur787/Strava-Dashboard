@@ -250,10 +250,6 @@ When your HR-based aerobic VDOT is available, a second prediction is shown using
 **Load adjustment**
 - A small conservative penalty (up to +10% time) when the composite risk score exceeds 55, indicating high recent load.
 
-**Pacing strategy**
-- Even split: goal pace throughout.
-- Negative split: first half at pace \u00d7 1.025, second half at pace \u00d7 0.975 (\u00b12.5%).
-- **Source:** Abbiss CR & Laursen PB (2008). *Sports Medicine*, 38(3), 239\u2013252.
 """
         )
 
