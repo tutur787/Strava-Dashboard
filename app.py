@@ -115,16 +115,30 @@ _OAUTH_ENABLED     = bool(_STRAVA_CLIENT_ID and _STRAVA_CLIENT_SECRET)
 # The _exchanged_code guard prevents a second token exchange on the rerun
 # that Streamlit triggers immediately after st.query_params.clear().
 if _in_oauth_callback:
-    _auth_code = st.query_params.get("code", "")
+    _auth_code  = st.query_params.get("code", "")
+    _auth_error = st.query_params.get("error", "")
+
+    if _auth_error:
+        # User denied access or Strava returned an error
+        st.error(f"Strava authorisation denied: `{_auth_error}`. Please try again.")
+        st.query_params.clear()
+        st.stop()
+
     if _auth_code and st.session_state.get("_exchanged_code") != _auth_code:
         st.session_state["_exchanged_code"] = _auth_code
         with st.spinner("Connecting to Strava…"):
-            _tok = exchange_strava_code(
-                _STRAVA_CLIENT_ID,
-                _STRAVA_CLIENT_SECRET,
-                _auth_code,
-                _REDIRECT_URI,
-            )
+            try:
+                _tok = exchange_strava_code(
+                    _STRAVA_CLIENT_ID,
+                    _STRAVA_CLIENT_SECRET,
+                    _auth_code,
+                    _REDIRECT_URI,
+                )
+            except Exception as _exc:
+                st.error(f"Token exchange failed: {_exc}")
+                st.query_params.clear()
+                st.stop()
+
         if _tok and "access_token" in _tok:
             st.session_state["strava_tokens"] = _tok
             _ath = _tok.get("athlete", {})
@@ -144,8 +158,21 @@ if _in_oauth_callback:
                     st.session_state["strava_athlete_sex"] = "Women"
                 else:
                     st.session_state["strava_athlete_sex"] = "Prefer not to say"
-        st.query_params.clear()
-        st.rerun()
+            st.query_params.clear()
+            st.rerun()
+        else:
+            # Exchange succeeded but Strava returned an error body
+            _err_msg = _tok.get("message", "Unknown error") if isinstance(_tok, dict) else str(_tok)
+            _err_detail = _tok.get("errors", "") if isinstance(_tok, dict) else ""
+            st.error(
+                f"Strava connection failed: **{_err_msg}**"
+                + (f" — {_err_detail}" if _err_detail else "")
+                + "\n\nMost common cause: the `redirect_uri` in your Streamlit secrets "
+                "does not exactly match the one used during authorisation. "
+                "Make sure it is set to `https://allure-run.streamlit.app/` (with trailing slash)."
+            )
+            st.query_params.clear()
+            st.stop()
 
 # ── Silent token refresh from cookies ────────────────────────────────
 if "strava_tokens" not in st.session_state and _COOKIES_ENABLED and _cookies is not None:
