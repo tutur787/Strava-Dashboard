@@ -16,7 +16,6 @@ from analytics import (
 def render(data: dict, settings: dict) -> None:
     use_miles = settings["use_miles"]
     max_hr = settings["max_hr"]
-    readiness_window_days = settings["readiness_window_days"]
 
     daily_all = data["daily_all"]
     weekly_all = data["weekly_all"]
@@ -40,9 +39,9 @@ def render(data: dict, settings: dict) -> None:
 
     daily_risk, weekly_risk = compute_risk_table(daily, weekly)
 
-    # Focus window
+    # Focus window — fixed at 90 days
     end_focus = daily_risk["date_ts"].max()
-    start_focus = end_focus - pd.Timedelta(days=int(readiness_window_days))
+    start_focus = end_focus - pd.Timedelta(days=90)
     d_focus = daily_risk[(daily_risk["date_ts"] >= start_focus) & (daily_risk["date_ts"] <= end_focus)].copy()
     w_focus = weekly_risk[weekly_risk["week_start"] >= (start_focus - pd.Timedelta(days=7))].copy()
 
