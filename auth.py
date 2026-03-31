@@ -12,14 +12,15 @@ from config import STRAVA_API_BASE, STRAVA_AUTH_URL, STRAVA_TOKEN_URL
 
 def get_strava_auth_url(client_id: str, redirect_uri: str) -> str:
     from urllib.parse import urlencode
-    params = {
+    # Scope is appended separately — urlencode would encode commas/colons as %2C/%3A
+    # which Strava's auth server rejects. Scope must be a plain comma-separated string.
+    params = urlencode({
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "approval_prompt": "auto",
-        "scope": "read,activity:read_all",
-    }
-    return STRAVA_AUTH_URL + "?" + urlencode(params)
+    })
+    return f"{STRAVA_AUTH_URL}?{params}&scope=read,activity:read_all"
 
 
 def exchange_strava_code(client_id, client_secret, code, redirect_uri: str = "") -> dict:
