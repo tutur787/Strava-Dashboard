@@ -258,6 +258,8 @@ def render_sidebar(
                 except Exception:
                     pass
 
+            st.info("New Strava activities sync automatically. Refresh your browser tab to load the latest data.", icon="🔄")
+
             _col1, _col2 = st.columns(2)
             if _col1.button("Refresh data", help="Re-fetch all activities from Strava"):
                 _refresh_athlete_id = st.session_state.get("strava_athlete_id")
