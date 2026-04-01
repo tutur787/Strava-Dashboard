@@ -621,6 +621,18 @@ if "gear_details" not in st.session_state:
 
 gear_details = st.session_state.get("gear_details", {})
 
+# ── Missing streams notice ────────────────────────────────────────────
+if len(df_range) > 0 and "id" in df_range.columns:
+    _range_ids = set(df_range["id"].dropna().astype(int).tolist())
+    _missing_streams = _range_ids - set(streams_by_id.keys())
+    _n_missing = len(_missing_streams)
+    if _n_missing > 0:
+        st.caption(
+            f"⚠️ **{_n_missing} activit{'y' if _n_missing == 1 else 'ies'}** in the selected range "
+            f"{'is' if _n_missing == 1 else 'are'} missing GPS streams (cadence, GAP, HR detail). "
+            "Click **Refresh data** in the sidebar to fetch them from Strava."
+        )
+
 # ── Insight banner ────────────────────────────────────────────────────
 if len(daily_all) > 0 and len(activities) > 0:
     try:
