@@ -261,7 +261,7 @@ def render_sidebar(
             st.caption("🔄 Activities sync automatically — refresh your browser tab to load the latest.")
 
             _col1, _col2 = st.columns(2)
-            if _col1.button("Refresh data", help="Re-fetch all activities from Strava"):
+            if _col1.button("Refresh data", help="Clears the local cache and re-fetches your full activity history from Strava. Only needed if data looks wrong or out of sync — for new activities, just refresh your browser tab."):
                 _refresh_athlete_id = st.session_state.get("strava_athlete_id")
                 for _k in ["strava_activities", "strava_streams", "gear_details", "strava_fetched_at"]:
                     st.session_state.pop(_k, None)
