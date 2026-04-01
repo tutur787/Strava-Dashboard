@@ -290,13 +290,14 @@ def render_sidebar(
                     except Exception:
                         pass
                 st.rerun()
-            st.caption("'Refresh data' re-fetches your full activity history from Strava. New activities sync automatically — only use this if data looks wrong or corrupted.")
             st.caption(
-                "General activity data (distance, pace, HR averages) syncs automatically. "
+                "New activities sync automatically — refresh your browser to see them. "
+                "General activity data (distance, pace, HR averages) is always available. "
                 "'Fetch Streams' downloads per-second HR, pace, cadence and GPS data for the selected date range — "
-                "only needed for detailed analysis like the long run inspector, cadence, and grade-adjusted pace."
+                "only needed for detailed analysis like the long run inspector, cadence, and grade-adjusted pace. "
+                "'Refresh data' re-fetches your full history from Strava — only use this if data looks wrong or corrupted."
             )
-            
+
     # Build derived unit helpers
     _pace_factor = (1.0 / KM_TO_MILES) if use_miles else 1.0
     _pace_lbl = f"min/{'mi' if use_miles else 'km'}"
